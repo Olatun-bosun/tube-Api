@@ -860,7 +860,13 @@ namespace YouTube.Controllers
 
         private static string GetQualityFormat(string? quality)
         {
-            return quality?.ToLower() switch
+            // Fix: Handle null/empty quality properly
+            if (string.IsNullOrEmpty(quality))
+            {
+                quality = "best";
+            }
+
+            return quality.ToLower() switch
             {
                 "best" => "best[ext=mp4]/best",
                 "best-merge" => "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio",

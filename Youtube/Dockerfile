@@ -38,7 +38,7 @@ COPY --from=publish /app/publish .
 ENV ASPNETCORE_URLS=http://+:8080
 ENV ASPNETCORE_ENVIRONMENT=Production
 ENV YtDlpPath=yt-dlp
-ENV FFmpegPath=ffmpeg
+ENV FFmpegPath=/usr/bin/ffmpeg
 ENV DownloadPath=/tmp/youtube-downloads
 
 # Create download directory
