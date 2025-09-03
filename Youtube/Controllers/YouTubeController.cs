@@ -769,31 +769,77 @@ namespace YouTube.Controllers
 
         private void ParseProgressUpdate(string output, DownloadSession session)
         {
-            // Parse yt-dlp progress output
-            // Format: [download]  45.2% of 125.45MiB at 2.35MiB/s ETA 00:32
-            var progressRegex = new Regex(@"\[download\]\s+(\d+\.?\d*)%.*?(\d+\.?\d*\w+iB)\s+at\s+(\d+\.?\d*\w+iB/s).*?ETA\s+(\d{2}:\d{2})");
-            var match = progressRegex.Match(output);
-
-            if (match.Success)
+            try
             {
-                if (double.TryParse(match.Groups[1].Value, out var progress))
-                {
-                    session.Progress = progress;
-                }
-                session.FileSize = match.Groups[2].Value;
-                session.Speed = match.Groups[3].Value;
-                session.ETA = match.Groups[4].Value;
+                // Handle different types of yt-dlp output
 
-                // Notify WebSocket if connected
+                // 1. Regular download progress: [download]  45.2% of 125.45MiB at 2.35MiB/s ETA 00:32
+                var progressRegex = new Regex(@"\[download\]\s+(\d+\.?\d*)%.*?(\d+\.?\d*\w+iB)\s+at\s+(\d+\.?\d*\w+iB/s).*?ETA\s+(\d{2}:\d{2})");
+                var progressMatch = progressRegex.Match(output);
+
+                // 2. Multi-stream info: [info] f137: Downloading webpage  
+                var infoRegex = new Regex(@"\[info\]\s+(.+)");
+                var infoMatch = infoRegex.Match(output);
+
+                // 3. Merging info: [ffmpeg] Merging formats into "filename.mp4"
+                var mergeRegex = new Regex(@"\[ffmpeg\]\s+Merging formats into");
+                var mergeMatch = mergeRegex.Match(output);
+
+                if (progressMatch.Success)
+                {
+                    if (double.TryParse(progressMatch.Groups[1].Value, out var progress))
+                    {
+                        // Only update progress if it's higher than current (avoid regression during multi-stream)
+                        if (progress > session.Progress || session.Progress == 0)
+                        {
+                            session.Progress = progress;
+                        }
+                    }
+
+                    var currentFileSize = progressMatch.Groups[2].Value;
+                    var currentSpeed = progressMatch.Groups[3].Value;
+                    var currentETA = progressMatch.Groups[4].Value;
+
+                    // Keep track of the largest file size seen (likely the video stream)
+                    if (string.IsNullOrEmpty(session.FileSize) ||
+                        IsLargerFileSize(currentFileSize, session.FileSize))
+                    {
+                        session.FileSize = currentFileSize;
+                    }
+
+                    session.Speed = currentSpeed;
+                    session.ETA = currentETA;
+
+                    _logger.LogDebug("Session {SessionId}: Progress {Progress}%, Size {FileSize}, Speed {Speed}",
+                        session.Id, session.Progress, session.FileSize, session.Speed);
+                }
+                else if (mergeMatch.Success)
+                {
+                    // When merging starts, we're near completion
+                    session.Progress = Math.Max(session.Progress, 95);
+                    session.Speed = "Merging...";
+                    session.ETA = "00:01";
+
+                    _logger.LogInformation("Session {SessionId}: Merging video and audio streams", session.Id);
+                }
+                else if (infoMatch.Success)
+                {
+                    _logger.LogDebug("Session {SessionId}: {Info}", session.Id, infoMatch.Groups[1].Value);
+                }
+
+                // Send WebSocket update if connected
                 if (session.WebSocket?.State == System.Net.WebSockets.WebSocketState.Open)
                 {
                     var update = JsonSerializer.Serialize(new
                     {
+                        sessionId = session.Id,
                         progress = session.Progress,
                         speed = session.Speed,
-                        eta = session.ETA
+                        eta = session.ETA,
+                        fileSize = session.FileSize,
+                        status = session.Status.ToString().ToLower()
                     });
-                    
+
                     var bytes = System.Text.Encoding.UTF8.GetBytes(update);
                     _ = session.WebSocket.SendAsync(
                         new ArraySegment<byte>(bytes),
@@ -802,8 +848,38 @@ namespace YouTube.Controllers
                         CancellationToken.None);
                 }
             }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Error parsing progress update: {Output}", output);
+            }
         }
 
+        private static bool IsLargerFileSize(string newSize, string currentSize)
+        {
+            try
+            {
+                // Simple comparison - extract numbers and compare
+                var newSizeMatch = Regex.Match(newSize, @"(\d+\.?\d*)");
+                var currentSizeMatch = Regex.Match(currentSize, @"(\d+\.?\d*)");
+
+                if (newSizeMatch.Success && currentSizeMatch.Success &&
+                    double.TryParse(newSizeMatch.Groups[1].Value, out var newNum) &&
+                    double.TryParse(currentSizeMatch.Groups[1].Value, out var currentNum))
+                {
+                    // If both are same unit (MiB, GiB), compare directly
+                    if (newSize.Contains("GiB") && currentSize.Contains("MiB")) return true;
+                    if (newSize.Contains("MiB") && currentSize.Contains("GiB")) return false;
+
+                    return newNum > currentNum;
+                }
+            }
+            catch
+            {
+                // If comparison fails, keep the new size
+            }
+
+            return true;
+        }
         private async Task<object?> GetVideoInfoInternal(string videoUrl)
         {
             if (string.IsNullOrEmpty(videoUrl) || !IsValidYouTubeUrl(videoUrl))
