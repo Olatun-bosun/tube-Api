@@ -192,22 +192,36 @@ namespace YouTube.Controllers
                 return BadRequest("Download not completed or file not available");
             }
 
-            if (!System.IO.File.Exists(session.FilePath))
+            try
             {
-                return NotFound("File not found on disk");
+                var fileName = Path.GetFileName(session.FilePath);
+                if (fileName.Length > 9) fileName = fileName.Substring(9); // Remove session prefix
+
+                var contentType = GetContentType(Path.GetExtension(session.FilePath));
+
+                // Get file info for proper headers
+                var fileInfo = new FileInfo(session.FilePath);
+
+                // Set proper headers for file download
+                Response.Headers.Add("Content-Disposition", $"attachment; filename=\"{fileName}\"");
+                Response.Headers.Add("Content-Length", fileInfo.Length.ToString());
+                Response.ContentType = contentType;
+
+                // Stream the file directly instead of loading into memory
+                var fileStream = new FileStream(session.FilePath, FileMode.Open, FileAccess.Read, FileShare.Read);
+
+                // Return FileStreamResult for efficient streaming
+                return new FileStreamResult(fileStream, contentType)
+                {
+                    FileDownloadName = fileName,
+                    EnableRangeProcessing = true // Enable partial content/resume support
+                };
             }
-
-            var fileName = Path.GetFileName(session.FilePath);
-            if (fileName.Length > 9) fileName = fileName.Substring(9); // Remove session prefix
-
-            var fileBytes = await System.IO.File.ReadAllBytesAsync(session.FilePath);
-            var contentType = GetContentType(Path.GetExtension(session.FilePath));
-
-            // Optionally delete after serving
-            // System.IO.File.Delete(session.FilePath);
-            // _activeDownloads.TryRemove(sessionId, out _);
-
-            return File(fileBytes, contentType, fileName);
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error serving file for session {SessionId}", sessionId);
+                return StatusCode(500, "Error serving file");
+            }
         }
 
         //// Replace your stream-download method with this implementation
