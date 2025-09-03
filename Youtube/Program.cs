@@ -34,6 +34,12 @@ builder.Services.AddCors(options =>
 
 var app = builder.Build();
 
+// Add a simple health check endpoint at root
+app.MapGet("/", () => "API is running!");
+
+// Add health endpoint
+app.MapGet("/health", () => Results.Ok(new { status = "healthy", timestamp = DateTime.UtcNow }));
+
 // Configure the HTTP request pipeline.
 if (app.Environment.IsDevelopment())
 {
