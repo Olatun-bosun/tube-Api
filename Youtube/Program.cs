@@ -50,7 +50,7 @@ app.UseWebSockets(new WebSocketOptions
     KeepAliveInterval = TimeSpan.FromMinutes(2)
 });
 
-app.UseHttpsRedirection();
+//app.UseHttpsRedirection();
 app.UseRouting(); // This should be after CORS and WebSockets
 app.UseAuthorization();
 
