@@ -1,16 +1,23 @@
 var builder = WebApplication.CreateBuilder(args);
 
+// Configure URLs BEFORE building the app
+if (builder.Environment.IsDevelopment())
+{
+    // For local development, use available ports
+    builder.WebHost.UseUrls("http://localhost:5500", "https://localhost:7500");
+}
+else
+{
+    // For production (Railway), use the PORT environment variable
+    var port = Environment.GetEnvironmentVariable("PORT") ?? "8080";
+    builder.WebHost.UseUrls($"http://0.0.0.0:{port}");
+}
+
 // Add services to the container.
 builder.Services.AddControllers();
-
 // Learn more about configuring Swagger/OpenAPI at https://aka.ms/aspnetcore/swashbuckle
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
-
-
-// Configure the port properly for Railway
-var port = Environment.GetEnvironmentVariable("PORT") ?? "8080";
-builder.WebHost.UseUrls($"http://0.0.0.0:{port}");
 
 // Add CORS - More specific configuration
 builder.Services.AddCors(options =>
@@ -21,7 +28,6 @@ builder.Services.AddCors(options =>
               .AllowAnyMethod()
               .AllowAnyHeader();
     });
-
     // Alternative: More restrictive CORS for production
     options.AddPolicy("Development", policy =>
     {
@@ -59,7 +65,6 @@ app.UseWebSockets(new WebSocketOptions
 //app.UseHttpsRedirection();
 app.UseRouting(); // This should be after CORS and WebSockets
 app.UseAuthorization();
-
 app.MapControllers();
 
 app.Run();
