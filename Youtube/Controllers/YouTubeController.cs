@@ -198,29 +198,23 @@ namespace YouTube.Controllers
                 if (fileName.Length > 9) fileName = fileName.Substring(9); // Remove session prefix
 
                 var contentType = GetContentType(Path.GetExtension(session.FilePath));
-
-                // Get file info for proper headers
                 var fileInfo = new FileInfo(session.FilePath);
 
-                // Set proper headers for file download
+                // Set response headers
                 Response.Headers.Add("Content-Disposition", $"attachment; filename=\"{fileName}\"");
                 Response.Headers.Add("Content-Length", fileInfo.Length.ToString());
                 Response.ContentType = contentType;
 
-                // Stream the file directly instead of loading into memory
-                var fileStream = new FileStream(session.FilePath, FileMode.Open, FileAccess.Read, FileShare.Read);
+                // Stream file directly to response
+                using var fileStream = new FileStream(session.FilePath, FileMode.Open, FileAccess.Read);
+                await fileStream.CopyToAsync(Response.Body);
 
-                // Return FileStreamResult for efficient streaming
-                return new FileStreamResult(fileStream, contentType)
-                {
-                    FileDownloadName = fileName,
-                    EnableRangeProcessing = true // Enable partial content/resume support
-                };
+                return new EmptyResult();
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error serving file for session {SessionId}", sessionId);
-                return StatusCode(500, "Error serving file");
+                _logger.LogError(ex, "Error streaming file for session {SessionId}", sessionId);
+                return StatusCode(500, "Error streaming file");
             }
         }
 
