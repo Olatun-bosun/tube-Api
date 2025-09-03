@@ -40,6 +40,13 @@ builder.Services.AddCors(options =>
 
 var app = builder.Build();
 
+app.Use(async (context, next) =>
+{
+    Console.WriteLine($"Request: {context.Request.Method} {context.Request.Path}");
+    await next();
+    Console.WriteLine($"Response: {context.Response.StatusCode}");
+});
+
 app.UseSwagger();
 app.UseSwaggerUI();
 
@@ -61,6 +68,12 @@ app.MapControllers();
 
 // Add health endpoints AFTER UseRouting
 app.MapGet("/", () => "API is running!");
-app.MapGet("/health", () => Results.Ok(new { status = "healthy", timestamp = DateTime.UtcNow }));
-
+app.MapGet("/health", () => {
+    return Results.Ok(new
+    {
+        status = "healthy",
+        timestamp = DateTime.UtcNow,
+        environment = app.Environment.EnvironmentName
+    });
+});
 app.Run();
