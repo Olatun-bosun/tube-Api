@@ -649,11 +649,9 @@ namespace YouTube.Controllers
 
                 var arguments = new List<string>();
 
-                if (!string.IsNullOrEmpty(_ffmpegPath) && _ffmpegPath != "ffmpeg")
-                {
-                    arguments.Add("--ffmpeg-location");
-                    arguments.Add($"\"{_ffmpegPath}\"");
-                }
+                // Use the full FFmpeg path
+                arguments.Add("--ffmpeg-location");
+                arguments.Add("\"/usr/bin/ffmpeg\"");
 
                 arguments.AddRange(new[]
                 {
