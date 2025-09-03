@@ -642,20 +642,38 @@ namespace YouTube.Controllers
         private async Task ProcessDownloadAsync(string sessionId, DownloadRequest request, string outputTemplate)
         {
             var session = _activeDownloads[sessionId];
-            
+
             try
             {
                 session.Status = DownloadStatus.InProgress;
 
                 var arguments = new List<string>();
 
-                // Use the full FFmpeg path
-                arguments.Add("--ffmpeg-location");
-                arguments.Add("\"/usr/bin/ffmpeg\"");
+                // Debug: Log FFmpeg path
+                _logger.LogInformation("FFmpeg path from config: '{FFmpegPath}'", _ffmpegPath ?? "null");
+
+                // Fix: Use explicit FFmpeg path instead of relying on config
+                var ffmpegPath = "/usr/bin/ffmpeg";
+
+                // Check if FFmpeg exists before adding it
+                if (System.IO.File.Exists(ffmpegPath))
+                {
+                    arguments.Add("--ffmpeg-location");
+                    arguments.Add(ffmpegPath);
+                    _logger.LogInformation("Using FFmpeg at: {FFmpegPath}", ffmpegPath);
+                }
+                else
+                {
+                    _logger.LogWarning("FFmpeg not found at {FFmpegPath}, continuing without it", ffmpegPath);
+                }
+
+                // Fix: Ensure quality has a default value
+                var quality = request.Quality ?? "best";
+                _logger.LogInformation("Using quality: {Quality}", quality);
 
                 arguments.AddRange(new[]
                 {
-                    "-f", GetQualityFormat(request.Quality),
+                    "-f", GetQualityFormat(quality),
                     "-o", $"\"{outputTemplate}\"",
                     "--no-playlist",
                     "--restrict-filenames",
@@ -664,6 +682,9 @@ namespace YouTube.Controllers
                     "--newline", // Each progress update on new line
                     request.VideoUrl
                 });
+
+                // Debug: Log the complete command
+                _logger.LogInformation("yt-dlp command: {Command}", string.Join(" ", arguments));
 
                 await RunYtDlpWithProgressAsync(arguments, session);
 
