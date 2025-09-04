@@ -973,12 +973,12 @@ namespace YouTube.Controllers
             {
                 "best" => "best[ext=mp4]/best",
                 "best-merge" => "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio",
-                "4k" => "best[height<=2160][ext=mp4]/best[height<=2160]",
-                "1440p" => "best[height<=1440][ext=mp4]/best[height<=1440]",
-                "1080p" => "best[height<=1080][ext=mp4]/best[height<=1080]",
-                "720p" => "best[height<=720][ext=mp4]/best[height<=720]",
-                "480p" => "best[height<=480][ext=mp4]/best[height<=480]",
-                "360p" => "best[height<=360][ext=mp4]/best[height<=360]",
+                "4k" => "best[height=2160][ext=mp4]/best[height=2160]",
+                "1440p" => "best[height=1440][ext=mp4]/best[height=1440]",
+                "1080p" => "best[height=1080][ext=mp4]/best[height<1080]",
+                "720p" => "best[height=720][ext=mp4]/best[height=720]",
+                "480p" => "best[height=480][ext=mp4]/best[height=480]",
+                "360p" => "best[height=360][ext=mp4]/best[height=360]",
                 "worst" => "worst[ext=mp4]/worst",
                 _ => "best[ext=mp4]/best"
             };
