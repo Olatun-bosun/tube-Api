@@ -684,7 +684,7 @@ namespace YouTube.Controllers
             }
         }
 
-        // Add this method to test specific format selection
+        // Enhanced test method to validate format selection and file sizes
         [HttpGet("test-quality")]
         public async Task<IActionResult> TestQualitySelection([FromQuery] string videoUrl, [FromQuery] string quality = "720p")
         {
@@ -697,19 +697,8 @@ namespace YouTube.Controllers
 
                 var formatString = GetQualityFormat(quality);
 
-                // Test what format would be selected
+                // Test what format would be selected with file size info
                 var arguments = new List<string>
-        {
-            "-f", formatString,
-            "--get-format",
-            "--no-playlist",
-            videoUrl
-        };
-
-                var result = await RunYtDlpAsync(arguments);
-
-                // Also get the actual format details
-                var detailArgs = new List<string>
         {
             "-f", formatString,
             "--dump-json",
@@ -717,31 +706,73 @@ namespace YouTube.Controllers
             videoUrl
         };
 
-                var detailResult = await RunYtDlpAsync(detailArgs);
+                var result = await RunYtDlpAsync(arguments);
 
                 object? formatDetails = null;
-                if (detailResult.Success)
+                if (result.Success)
                 {
                     try
                     {
-                        var json = JsonSerializer.Deserialize<JsonElement>(detailResult.Output);
-                        formatDetails = new
+                        var json = JsonSerializer.Deserialize<JsonElement>(result.Output);
+
+                        // Handle both single format and merged format responses
+                        if (json.ValueKind == JsonValueKind.Array)
                         {
-                            resolution = GetJsonString(json, "resolution"),
-                            width = GetJsonInt(json, "width"),
-                            height = GetJsonInt(json, "height"),
-                            filesize = GetJsonLong(json, "filesize"),
-                            filesizeApprox = GetJsonLong(json, "filesize_approx"),
-                            formatNote = GetJsonString(json, "format_note"),
-                            vcodec = GetJsonString(json, "vcodec"),
-                            acodec = GetJsonString(json, "acodec"),
-                            ext = GetJsonString(json, "ext"),
-                            formatId = GetJsonString(json, "format_id")
-                        };
+                            // Multiple formats (video + audio merge)
+                            var formats = new List<object>();
+                            long totalSize = 0;
+
+                            foreach (var format in json.EnumerateArray())
+                            {
+                                var size = GetJsonLong(format, "filesize") + GetJsonLong(format, "filesize_approx");
+                                totalSize += size;
+
+                                formats.Add(new
+                                {
+                                    formatId = GetJsonString(format, "format_id"),
+                                    resolution = GetJsonString(format, "resolution"),
+                                    width = GetJsonInt(format, "width"),
+                                    height = GetJsonInt(format, "height"),
+                                    filesize = size,
+                                    formatNote = GetJsonString(format, "format_note"),
+                                    vcodec = GetJsonString(format, "vcodec"),
+                                    acodec = GetJsonString(format, "acodec"),
+                                    ext = GetJsonString(format, "ext")
+                                });
+                            }
+
+                            formatDetails = new
+                            {
+                                type = "merged",
+                                formats = formats,
+                                totalEstimatedSize = totalSize,
+                                totalEstimatedSizeMB = Math.Round(totalSize / (1024.0 * 1024.0), 2)
+                            };
+                        }
+                        else
+                        {
+                            // Single format
+                            var size = GetJsonLong(json, "filesize") + GetJsonLong(json, "filesize_approx");
+                            formatDetails = new
+                            {
+                                type = "single",
+                                formatId = GetJsonString(json, "format_id"),
+                                resolution = GetJsonString(json, "resolution"),
+                                width = GetJsonInt(json, "width"),
+                                height = GetJsonInt(json, "height"),
+                                filesize = size,
+                                filesizeMB = Math.Round(size / (1024.0 * 1024.0), 2),
+                                formatNote = GetJsonString(json, "format_note"),
+                                vcodec = GetJsonString(json, "vcodec"),
+                                acodec = GetJsonString(json, "acodec"),
+                                ext = GetJsonString(json, "ext")
+                            };
+                        }
                     }
                     catch (Exception ex)
                     {
                         _logger.LogWarning(ex, "Failed to parse format details");
+                        formatDetails = new { error = ex.Message, rawOutput = result.Output };
                     }
                 }
 
@@ -749,10 +780,14 @@ namespace YouTube.Controllers
                 {
                     requestedQuality = quality,
                     formatString = formatString,
-                    selectedFormat = result.Output,
                     success = result.Success,
                     error = result.Error,
-                    formatDetails = formatDetails
+                    formatDetails = formatDetails,
+                    instructions = new
+                    {
+                        message = "Check the filesizeMB or totalEstimatedSizeMB values",
+                        note = "Different qualities should show different file sizes now"
+                    }
                 });
             }
             catch (Exception ex)
@@ -1087,7 +1122,7 @@ namespace YouTube.Controllers
 
             return quality.ToLower() switch
             {
-                // Strict quality matching - no fallback to higher quality
+                // Try to get specific resolution, but be more aggressive about limiting quality
                 "240p" => "worst[height<=240][ext=mp4]/worst[height<=240]/worst[ext=mp4]/worst",
                 "360p" => "best[height<=360][height>=240][ext=mp4]/best[height<=360][ext=mp4]/worst[height>240]",
                 "480p" => "best[height<=480][height>=360][ext=mp4]/best[height<=480][ext=mp4]/best[height<=480]",
@@ -1096,14 +1131,14 @@ namespace YouTube.Controllers
                 "1440p" => "best[height<=1440][height>=1080][ext=mp4]/best[height<=1440][ext=mp4]/best[height<=1440]",
                 "4k" => "best[height<=2160][height>=1440][ext=mp4]/best[height<=2160][ext=mp4]/best[height<=2160]",
 
+                // More explicit format selection
+                "small" => "worst[ext=mp4]/worst",
+                "medium" => "best[height<=480][ext=mp4]/best[height<=480]",
+                "large" => "best[height<=1080][ext=mp4]/best[height<=1080]",
 
                 // Audio only
                 "audio" => "bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio",
 
-                // Size-based options
-                "small" => "worst[ext=mp4]/worst",
-                "medium" => "best[height<=720][ext=mp4]/best[height<=720]",
-                "large" => "best[height<=1080][ext=mp4]/best[height<=1080]",
 
                 // Bandwidth-conscious options
                 "low-bandwidth" => "worst[ext=mp4]/worst",
