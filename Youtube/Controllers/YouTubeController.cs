@@ -645,6 +645,122 @@ namespace YouTube.Controllers
                 return StatusCode(500, $"Error getting video info: {ex.Message}");
             }
         }
+        // Add this new endpoint to test what formats are actually available
+        [HttpGet("debug-formats")]
+        public async Task<IActionResult> DebugAvailableFormats([FromQuery] string videoUrl)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(videoUrl) || !IsValidYouTubeUrl(videoUrl))
+                {
+                    return BadRequest("Invalid YouTube URL");
+                }
+
+                // Get all available formats with detailed info
+                var arguments = new List<string>
+        {
+            "-F", // List all available formats
+            "--no-playlist",
+            videoUrl
+        };
+
+                var result = await RunYtDlpAsync(arguments);
+                if (!result.Success)
+                {
+                    return BadRequest($"Failed to get formats: {result.Error}");
+                }
+
+                return Ok(new
+                {
+                    videoUrl = videoUrl,
+                    availableFormats = result.Output,
+                    debugInfo = "Use this to see what formats are actually available for this video"
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error getting debug formats for: {Url}", videoUrl);
+                return StatusCode(500, $"Error: {ex.Message}");
+            }
+        }
+
+        // Add this method to test specific format selection
+        [HttpGet("test-quality")]
+        public async Task<IActionResult> TestQualitySelection([FromQuery] string videoUrl, [FromQuery] string quality = "720p")
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(videoUrl) || !IsValidYouTubeUrl(videoUrl))
+                {
+                    return BadRequest("Invalid YouTube URL");
+                }
+
+                var formatString = GetQualityFormat(quality);
+
+                // Test what format would be selected
+                var arguments = new List<string>
+        {
+            "-f", formatString,
+            "--get-format",
+            "--no-playlist",
+            videoUrl
+        };
+
+                var result = await RunYtDlpAsync(arguments);
+
+                // Also get the actual format details
+                var detailArgs = new List<string>
+        {
+            "-f", formatString,
+            "--dump-json",
+            "--no-playlist",
+            videoUrl
+        };
+
+                var detailResult = await RunYtDlpAsync(detailArgs);
+
+                object? formatDetails = null;
+                if (detailResult.Success)
+                {
+                    try
+                    {
+                        var json = JsonSerializer.Deserialize<JsonElement>(detailResult.Output);
+                        formatDetails = new
+                        {
+                            resolution = GetJsonString(json, "resolution"),
+                            width = GetJsonInt(json, "width"),
+                            height = GetJsonInt(json, "height"),
+                            filesize = GetJsonLong(json, "filesize"),
+                            filesizeApprox = GetJsonLong(json, "filesize_approx"),
+                            formatNote = GetJsonString(json, "format_note"),
+                            vcodec = GetJsonString(json, "vcodec"),
+                            acodec = GetJsonString(json, "acodec"),
+                            ext = GetJsonString(json, "ext"),
+                            formatId = GetJsonString(json, "format_id")
+                        };
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Failed to parse format details");
+                    }
+                }
+
+                return Ok(new
+                {
+                    requestedQuality = quality,
+                    formatString = formatString,
+                    selectedFormat = result.Output,
+                    success = result.Success,
+                    error = result.Error,
+                    formatDetails = formatDetails
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error testing quality selection: {Url}", videoUrl);
+                return StatusCode(500, $"Error: {ex.Message}");
+            }
+        }
 
         // Background download processing with progress tracking
         private async Task ProcessDownloadAsync(string sessionId, DownloadRequest request, string outputTemplate)
@@ -972,13 +1088,14 @@ namespace YouTube.Controllers
             return quality.ToLower() switch
             {
                 // Strict quality matching - no fallback to higher quality
-                "4k" => "best[height<=2160][ext=mp4]/best[height<=2160]",
-                "1440p" => "best[height<=1440][ext=mp4]/best[height<=1440]",
-                "1080p" => "best[height<=1080][ext=mp4]/best[height<=1080]",
-                "720p" => "best[height<=720][ext=mp4]/best[height<=720]",
-                "480p" => "best[height<=480][ext=mp4]/best[height<=480]",
-                "360p" => "best[height<=360][ext=mp4]/best[height<=360]",
-                "240p" => "best[height<=240][ext=mp4]/best[height<=240]",
+                "240p" => "worst[height<=240][ext=mp4]/worst[height<=240]/worst[ext=mp4]/worst",
+                "360p" => "best[height<=360][height>=240][ext=mp4]/best[height<=360][ext=mp4]/worst[height>240]",
+                "480p" => "best[height<=480][height>=360][ext=mp4]/best[height<=480][ext=mp4]/best[height<=480]",
+                "720p" => "best[height<=720][height>=480][ext=mp4]/best[height<=720][ext=mp4]/best[height<=720]",
+                "1080p" => "best[height<=1080][height>=720][ext=mp4]/best[height<=1080][ext=mp4]/best[height<=1080]",
+                "1440p" => "best[height<=1440][height>=1080][ext=mp4]/best[height<=1440][ext=mp4]/best[height<=1440]",
+                "4k" => "best[height<=2160][height>=1440][ext=mp4]/best[height<=2160][ext=mp4]/best[height<=2160]",
+
 
                 // Audio only
                 "audio" => "bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio",
