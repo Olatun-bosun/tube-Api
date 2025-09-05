@@ -66,6 +66,7 @@ namespace YouTube.Controllers
             }
         }
 
+        // Also update your direct download method
         [HttpPost("download")]
         public async Task<IActionResult> DownloadVideo([FromQuery] DownloadRequest request)
         {
@@ -81,30 +82,11 @@ namespace YouTube.Controllers
                     return BadRequest("Invalid YouTube URL");
                 }
 
-                // Generate unique filename to avoid conflicts
                 var sessionId = Guid.NewGuid().ToString("N")[..8];
                 var outputTemplate = Path.Combine(_downloadPath, $"{sessionId}_%(title)s.%(ext)s");
 
-                // Build yt-dlp command arguments for best quality
-                var arguments = new List<string>();
-
-                // Add FFmpeg path if configured (must be first)
-                if (!string.IsNullOrEmpty(_ffmpegPath))
-                {
-                    arguments.Add("--ffmpeg-location");
-                    arguments.Add($"\"{_ffmpegPath}\"");
-                }
-
-                arguments.AddRange(new[]
-                {
-                            "-f", GetQualityFormat(request.Quality),
-                            "-o", $"\"{outputTemplate}\"",
-                            "--no-playlist",
-                            "--restrict-filenames",
-                            "--merge-output-format", "mp4",
-                            "--embed-metadata",
-                            request.VideoUrl
-                        });
+                // Use the updated method with cookie support
+                var arguments = BuildYtDlpArgumentsWithCookies(request, outputTemplate);
 
                 var result = await RunYtDlpAsync(arguments);
 
@@ -113,7 +95,6 @@ namespace YouTube.Controllers
                     return BadRequest($"Download failed: {result.Error}");
                 }
 
-                // Find the downloaded file
                 var downloadedFiles = Directory.GetFiles(_downloadPath, $"{sessionId}_*");
                 if (downloadedFiles.Length == 0)
                 {
@@ -121,10 +102,9 @@ namespace YouTube.Controllers
                 }
 
                 var filePath = downloadedFiles[0];
-                var fileName = Path.GetFileName(filePath).Substring(9); // Remove session prefix
+                var fileName = Path.GetFileName(filePath).Substring(9);
                 var fileBytes = await System.IO.File.ReadAllBytesAsync(filePath);
 
-                // Clean up the file after reading
                 System.IO.File.Delete(filePath);
 
                 var contentType = GetContentType(Path.GetExtension(filePath));
@@ -646,7 +626,7 @@ namespace YouTube.Controllers
             }
         }
 
-        // Background download processing with progress tracking
+        // Update your ProcessDownloadAsync method to use the new argument builder
         private async Task ProcessDownloadAsync(string sessionId, DownloadRequest request, string outputTemplate)
         {
             var session = _activeDownloads[sessionId];
@@ -655,50 +635,15 @@ namespace YouTube.Controllers
             {
                 session.Status = DownloadStatus.InProgress;
 
-                var arguments = new List<string>();
+                // Use the new method that includes cookie support
+                var arguments = BuildYtDlpArgumentsWithCookies(request, outputTemplate);
 
-                // Debug: Log FFmpeg path
-                _logger.LogInformation("FFmpeg path from config: '{FFmpegPath}'", _ffmpegPath ?? "null");
-
-                // Fix: Use explicit FFmpeg path instead of relying on config
-                var ffmpegPath = "/usr/bin/ffmpeg";
-
-                // Check if FFmpeg exists before adding it
-                if (System.IO.File.Exists(ffmpegPath))
-                {
-                    arguments.Add("--ffmpeg-location");
-                    arguments.Add(ffmpegPath);
-                    _logger.LogInformation("Using FFmpeg at: {FFmpegPath}", ffmpegPath);
-                }
-                else
-                {
-                    _logger.LogWarning("FFmpeg not found at {FFmpegPath}, continuing without it", ffmpegPath);
-                }
-
-                // Fix: Ensure quality has a default value
-                var quality = request.Quality ?? "best";
-                _logger.LogInformation("Using quality: {Quality}", quality);
-
-                arguments.AddRange(new[]
-                {
-                    "-f", GetQualityFormat(quality),
-                    "-o", $"\"{outputTemplate}\"",
-                    "--no-playlist",
-                    "--restrict-filenames",
-                    "--merge-output-format", "mp4",
-                    "--embed-metadata",
-                    "--newline", // Each progress update on new line
-                    request.VideoUrl
-                });
-
-                // Debug: Log the complete command
                 _logger.LogInformation("yt-dlp command: {Command}", string.Join(" ", arguments));
 
                 await RunYtDlpWithProgressAsync(arguments, session);
 
                 if (session.Status != DownloadStatus.Cancelled)
                 {
-                    // Find downloaded file
                     var downloadedFiles = Directory.GetFiles(_downloadPath, $"{sessionId}_*");
                     if (downloadedFiles.Length > 0)
                     {
@@ -1030,6 +975,61 @@ namespace YouTube.Controllers
             return element.TryGetProperty(property, out var prop) && prop.ValueKind == JsonValueKind.Number
                 ? prop.GetInt64()
                 : 0;
+        }
+
+        private List<string> BuildYtDlpArgumentsWithCookies(DownloadRequest request, string outputTemplate)
+        {
+            var arguments = new List<string>();
+
+            // Add cookie support - this is the key fix for the bot detection
+            var cookiePath = Path.Combine(_downloadPath, "youtube_cookies.txt");
+
+            // If cookies file exists, use it
+            if (System.IO.File.Exists(cookiePath))
+            {
+                arguments.Add("--cookies");
+                arguments.Add($"\"{cookiePath}\"");
+            }
+            else
+            {
+                // Try to extract cookies from browser (Chrome as example)
+                arguments.Add("--cookies-from-browser");
+                arguments.Add("chrome");
+            }
+
+            // Add user agent to appear more like a real browser
+            arguments.Add("--user-agent");
+            arguments.Add("\"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36\"");
+
+            // Add other anti-detection measures
+            arguments.Add("--sleep-interval");
+            arguments.Add("1");
+            arguments.Add("--max-sleep-interval");
+            arguments.Add("5");
+
+            // FFmpeg configuration
+            var ffmpegPath = "/usr/bin/ffmpeg";
+            if (System.IO.File.Exists(ffmpegPath))
+            {
+                arguments.Add("--ffmpeg-location");
+                arguments.Add(ffmpegPath);
+            }
+
+            // Quality and output settings
+            var quality = request.Quality ?? "best";
+            arguments.AddRange(new[]
+            {
+        "-f", GetQualityFormat(quality),
+        "-o", $"\"{outputTemplate}\"",
+        "--no-playlist",
+        "--restrict-filenames",
+        "--merge-output-format", "mp4",
+        "--embed-metadata",
+        "--newline",
+        request.VideoUrl
+    });
+
+            return arguments;
         }
 
         private static List<object> GetAvailableFormats(JsonElement videoInfo)
