@@ -66,7 +66,7 @@ namespace YouTube.Controllers
             }
         }
 
-        // Also update your direct download method
+        // Update your download method to use the server-friendly approach
         [HttpPost("download")]
         public async Task<IActionResult> DownloadVideo([FromQuery] DownloadRequest request)
         {
@@ -85,13 +85,33 @@ namespace YouTube.Controllers
                 var sessionId = Guid.NewGuid().ToString("N")[..8];
                 var outputTemplate = Path.Combine(_downloadPath, $"{sessionId}_%(title)s.%(ext)s");
 
-                // Use the updated method with cookie support
-                var arguments = BuildYtDlpArgumentsWithCookies(request, outputTemplate);
+                var baseArguments = new List<string>
+        {
+            "-f", GetQualityFormat(request.Quality),
+            "-o", $"\"{outputTemplate}\"",
+            "--no-playlist",
+            "--restrict-filenames",
+            "--merge-output-format", "mp4",
+            "--embed-metadata",
+            request.VideoUrl
+        };
 
-                var result = await RunYtDlpAsync(arguments);
+                // Use server-friendly fallback method
+                var result = await RunYtDlpWithServerFallbackAsync(baseArguments);
 
                 if (!result.Success)
                 {
+                    if (result.Error.Contains("Sign in to confirm"))
+                    {
+                        return BadRequest(new
+                        {
+                            error = "YouTube requires authentication",
+                            message = "Please upload a cookies file to authenticate",
+                            instruction = "Export cookies from your browser and upload via POST /api/YouTube/upload-cookies",
+                            cookieExtractionUrl = "https://chrome.google.com/webstore/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc"
+                        });
+                    }
+
                     return BadRequest($"Download failed: {result.Error}");
                 }
 
@@ -102,9 +122,10 @@ namespace YouTube.Controllers
                 }
 
                 var filePath = downloadedFiles[0];
-                var fileName = Path.GetFileName(filePath).Substring(9);
-                var fileBytes = await System.IO.File.ReadAllBytesAsync(filePath);
+                var fileName = Path.GetFileName(filePath);
+                if (fileName.Length > 9) fileName = fileName.Substring(9);
 
+                var fileBytes = await System.IO.File.ReadAllBytesAsync(filePath);
                 System.IO.File.Delete(filePath);
 
                 var contentType = GetContentType(Path.GetExtension(filePath));
@@ -981,31 +1002,56 @@ namespace YouTube.Controllers
         {
             var arguments = new List<string>();
 
-            // Add cookie support - this is the key fix for the bot detection
+            // Check if we have a cookies file first (preferred method for servers)
             var cookiePath = Path.Combine(_downloadPath, "youtube_cookies.txt");
 
-            // If cookies file exists, use it
             if (System.IO.File.Exists(cookiePath))
             {
                 arguments.Add("--cookies");
                 arguments.Add($"\"{cookiePath}\"");
+                _logger.LogInformation("Using cookies file: {CookiePath}", cookiePath);
             }
             else
             {
-                // Try to extract cookies from browser (Chrome as example)
-                arguments.Add("--cookies-from-browser");
-                arguments.Add("chrome");
+                _logger.LogWarning("No cookies file found at {CookiePath}", cookiePath);
+
+                // Add anti-detection measures without browser cookies
+                arguments.Add("--user-agent");
+                arguments.Add("\"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36\"");
+
+                // Add headers to appear more legitimate
+                arguments.Add("--add-header");
+                arguments.Add("\"Accept:text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\"");
+
+                arguments.Add("--add-header");
+                arguments.Add("\"Accept-Language:en-US,en;q=0.5\"");
+
+                arguments.Add("--add-header");
+                arguments.Add("\"Accept-Encoding:gzip, deflate\"");
+
+                arguments.Add("--add-header");
+                arguments.Add("\"DNT:1\"");
+
+                arguments.Add("--add-header");
+                arguments.Add("\"Connection:keep-alive\"");
+
+                arguments.Add("--add-header");
+                arguments.Add("\"Upgrade-Insecure-Requests:1\"");
             }
 
-            // Add user agent to appear more like a real browser
-            arguments.Add("--user-agent");
-            arguments.Add("\"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36\"");
-
-            // Add other anti-detection measures
+            // Add delay between requests to avoid rate limiting
             arguments.Add("--sleep-interval");
-            arguments.Add("1");
+            arguments.Add("3");
             arguments.Add("--max-sleep-interval");
-            arguments.Add("5");
+            arguments.Add("6");
+
+            // Add retry logic
+            arguments.Add("--retries");
+            arguments.Add("3");
+
+            // Skip unavailable fragments instead of failing
+            arguments.Add("--fragment-retries");
+            arguments.Add("3");
 
             // FFmpeg configuration
             var ffmpegPath = "/usr/bin/ffmpeg";
@@ -1013,6 +1059,11 @@ namespace YouTube.Controllers
             {
                 arguments.Add("--ffmpeg-location");
                 arguments.Add(ffmpegPath);
+                _logger.LogInformation("Using FFmpeg at: {FFmpegPath}", ffmpegPath);
+            }
+            else
+            {
+                _logger.LogWarning("FFmpeg not found at {FFmpegPath}", ffmpegPath);
             }
 
             // Quality and output settings
@@ -1032,6 +1083,139 @@ namespace YouTube.Controllers
             return arguments;
         }
 
+
+        // Updated fallback method that doesn't rely on browser cookies
+        private async Task<YtDlpResult> RunYtDlpWithServerFallbackAsync(List<string> baseArguments)
+        {
+            // Strategy 1: Try with manual cookies file if it exists
+            var cookiePath = Path.Combine(_downloadPath, "youtube_cookies.txt");
+            if (System.IO.File.Exists(cookiePath))
+            {
+                var cookieArguments = new List<string> { "--cookies", $"\"{cookiePath}\"" };
+                cookieArguments.AddRange(baseArguments);
+
+                var result = await RunYtDlpAsync(cookieArguments);
+                if (result.Success)
+                {
+                    _logger.LogInformation("Successfully downloaded using cookies file");
+                    return result;
+                }
+            }
+
+            // Strategy 2: Try with different user agents and longer delays
+            var strategies = new[]
+            {
+        new
+        {
+            UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            Sleep = "2"
+        },
+        new
+        {
+            UserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            Sleep = "4"
+        },
+        new
+        {
+            UserAgent = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            Sleep = "6"
+        }
+    };
+
+            foreach (var strategy in strategies)
+            {
+                try
+                {
+                    var arguments = new List<string>
+            {
+                "--user-agent", $"\"{strategy.UserAgent}\"",
+                "--sleep-interval", strategy.Sleep,
+                "--max-sleep-interval", "10",
+                "--retries", "5"
+            };
+                    arguments.AddRange(baseArguments);
+
+                    var result = await RunYtDlpAsync(arguments);
+                    if (result.Success)
+                    {
+                        _logger.LogInformation("Successfully downloaded using strategy with {Sleep}s sleep", strategy.Sleep);
+                        return result;
+                    }
+
+                    // Wait between strategies
+                    await Task.Delay(2000);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Failed with strategy: {UserAgent}", strategy.UserAgent);
+                }
+            }
+
+            // Strategy 3: Try with proxy settings (if configured)
+            try
+            {
+                var proxyArguments = new List<string>
+        {
+            "--geo-bypass",
+            "--no-check-certificate",
+            "--ignore-errors"
+        };
+                proxyArguments.AddRange(baseArguments);
+
+                var result = await RunYtDlpAsync(proxyArguments);
+                if (result.Success)
+                {
+                    _logger.LogInformation("Successfully downloaded using proxy bypass");
+                    return result;
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "All server-friendly strategies failed");
+            }
+
+            // Final attempt with minimal arguments
+            return await RunYtDlpAsync(baseArguments);
+        }
+
+        // Add endpoint to upload cookies file
+        [HttpPost("upload-cookies")]
+        public async Task<IActionResult> UploadCookies(IFormFile cookiesFile)
+        {
+            try
+            {
+                if (cookiesFile == null || cookiesFile.Length == 0)
+                {
+                    return BadRequest("No cookies file provided");
+                }
+
+                if (!cookiesFile.FileName.EndsWith(".txt"))
+                {
+                    return BadRequest("Cookies file must be a .txt file");
+                }
+
+                var cookiePath = Path.Combine(_downloadPath, "youtube_cookies.txt");
+
+                using (var stream = new FileStream(cookiePath, FileMode.Create))
+                {
+                    await cookiesFile.CopyToAsync(stream);
+                }
+
+                _logger.LogInformation("Cookies file uploaded successfully");
+
+                return Ok(new
+                {
+                    message = "Cookies file uploaded successfully",
+                    path = cookiePath,
+                    size = cookiesFile.Length
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error uploading cookies file");
+                return StatusCode(500, $"Error uploading cookies: {ex.Message}");
+            }
+        }
         private static List<object> GetAvailableFormats(JsonElement videoInfo)
         {
             var formats = new List<object>();
