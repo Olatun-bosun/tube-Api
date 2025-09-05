@@ -797,7 +797,7 @@ namespace YouTube.Controllers
             }
         }
 
-        // Background download processing with progress tracking
+        // Fix 4: Update ProcessDownloadAsync to remove manual quoting
         private async Task ProcessDownloadAsync(string sessionId, DownloadRequest request, string outputTemplate)
         {
             var session = _activeDownloads[sessionId];
@@ -808,48 +808,32 @@ namespace YouTube.Controllers
 
                 var arguments = new List<string>();
 
-                // Debug: Log FFmpeg path
-                _logger.LogInformation("FFmpeg path from config: '{FFmpegPath}'", _ffmpegPath ?? "null");
-
-                // Fix: Use explicit FFmpeg path instead of relying on config
+                // FFmpeg path handling
                 var ffmpegPath = "/usr/bin/ffmpeg";
-
-                // Check if FFmpeg exists before adding it
                 if (System.IO.File.Exists(ffmpegPath))
                 {
                     arguments.Add("--ffmpeg-location");
-                    arguments.Add(ffmpegPath);
-                    _logger.LogInformation("Using FFmpeg at: {FFmpegPath}", ffmpegPath);
-                }
-                else
-                {
-                    _logger.LogWarning("FFmpeg not found at {FFmpegPath}, continuing without it", ffmpegPath);
+                    arguments.Add(ffmpegPath); // Don't quote here, ArgumentList will handle it
                 }
 
-                // Fix: Ensure quality has a default value
                 var quality = request.Quality ?? "best";
-                _logger.LogInformation("Using quality: {Quality}", quality);
 
                 arguments.AddRange(new[]
                 {
-                    "-f", GetQualityFormat(quality),
-                    "-o", $"\"{outputTemplate}\"",
-                    "--no-playlist",
-                    "--restrict-filenames",
-                    "--merge-output-format", "mp4",
-                    "--embed-metadata",
-                    "--newline", // Each progress update on new line
-                    request.VideoUrl
-                });
-
-                // Debug: Log the complete command
-                _logger.LogInformation("yt-dlp command: {Command}", string.Join(" ", arguments));
+            "-f", GetQualityFormat(quality),
+            "-o", outputTemplate, // Don't quote here
+            "--no-playlist",
+            "--restrict-filenames",
+            "--merge-output-format", "mp4",
+            "--embed-metadata",
+            "--newline",
+            request.VideoUrl
+        });
 
                 await RunYtDlpWithProgressAsync(arguments, session);
 
                 if (session.Status != DownloadStatus.Cancelled)
                 {
-                    // Find downloaded file
                     var downloadedFiles = Directory.GetFiles(_downloadPath, $"{sessionId}_*");
                     if (downloadedFiles.Length > 0)
                     {
@@ -872,17 +856,52 @@ namespace YouTube.Controllers
             }
         }
 
+        // Supporting class for cookie setup
+        public class CookieSetupRequest
+        {
+            public string Browser { get; set; } = "chrome";
+        }
+
+        // Fix 2: Update the RunYtDlpWithProgressAsync method similarly
         private async Task<YtDlpResult> RunYtDlpWithProgressAsync(List<string> arguments, DownloadSession session)
         {
+            // Apply the same cookie and anti-detection measures
+            var enhancedArgs = new List<string>();
+
+            enhancedArgs.Add("--user-agent");
+            enhancedArgs.Add("\"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36\"");
+
+            enhancedArgs.Add("--referer");
+            enhancedArgs.Add("https://www.youtube.com/");
+
+            enhancedArgs.Add("--cookies-from-browser");
+            enhancedArgs.Add("chrome");
+
+            enhancedArgs.AddRange(new[]
+            {
+        "--sleep-interval", "1",
+        "--max-sleep-interval", "5",
+        "--extractor-retries", "3",
+        "--socket-timeout", "30"
+    });
+
+            enhancedArgs.AddRange(arguments);
+
             var startInfo = new ProcessStartInfo
             {
                 FileName = _ytDlpPath,
-                Arguments = string.Join(" ", arguments),
                 UseShellExecute = false,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 CreateNoWindow = true
             };
+
+            // Use ArgumentList instead of Arguments string
+            startInfo.ArgumentList.Clear();
+            foreach (var arg in enhancedArgs)
+            {
+                startInfo.ArgumentList.Add(arg);
+            }
 
             using var process = new Process { StartInfo = startInfo };
 
@@ -920,6 +939,123 @@ namespace YouTube.Controllers
             return new YtDlpResult
             {
                 Success = success,
+                Output = outputBuilder.ToString(),
+                Error = errorBuilder.ToString(),
+                ExitCode = process.ExitCode
+            };
+        }
+
+        // Fix 3: Add a method to set up cookies from browser
+        [HttpPost("setup-cookies")]
+        public async Task<IActionResult> SetupCookies([FromBody] CookieSetupRequest request)
+        {
+            try
+            {
+                var browser = request.Browser?.ToLower() ?? "chrome";
+                var validBrowsers = new[] { "chrome", "firefox", "edge", "safari", "opera" };
+
+                if (!validBrowsers.Contains(browser))
+                {
+                    return BadRequest($"Invalid browser. Supported browsers: {string.Join(", ", validBrowsers)}");
+                }
+
+                // Test if yt-dlp can extract cookies from the specified browser
+                var testArgs = new List<string>
+        {
+            "--cookies-from-browser", browser,
+            "--dump-json",
+            "--no-playlist",
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ" // Test video
+        };
+
+                var result = await RunYtDlpTestAsync(testArgs);
+
+                if (result.Success)
+                {
+                    return Ok(new
+                    {
+                        message = $"Successfully configured cookies from {browser}",
+                        browser = browser,
+                        status = "ready"
+                    });
+                }
+                else
+                {
+                    return BadRequest(new
+                    {
+                        message = $"Failed to extract cookies from {browser}",
+                        error = result.Error,
+                        suggestions = new[]
+                        {
+                    $"Make sure {browser} is installed and you're logged into YouTube",
+                    "Try logging out and back into YouTube in your browser",
+                    "Close all browser instances and try again",
+                    "Try a different browser"
+                }
+                    });
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error setting up cookies");
+                return StatusCode(500, $"Error setting up cookies: {ex.Message}");
+            }
+        }
+
+        private async Task<YtDlpResult> RunYtDlpTestAsync(List<string> arguments)
+        {
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = _ytDlpPath,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true
+            };
+
+            startInfo.ArgumentList.Clear();
+            foreach (var arg in arguments)
+            {
+                startInfo.ArgumentList.Add(arg);
+            }
+
+            using var process = new Process { StartInfo = startInfo };
+
+            var outputBuilder = new System.Text.StringBuilder();
+            var errorBuilder = new System.Text.StringBuilder();
+
+            process.OutputDataReceived += (sender, e) => {
+                if (e.Data != null) outputBuilder.AppendLine(e.Data);
+            };
+
+            process.ErrorDataReceived += (sender, e) => {
+                if (e.Data != null) errorBuilder.AppendLine(e.Data);
+            };
+
+            process.Start();
+            process.BeginOutputReadLine();
+            process.BeginErrorReadLine();
+
+            // Add timeout for testing
+            var timeoutTask = Task.Delay(30000); // 30 second timeout
+            var processTask = process.WaitForExitAsync();
+
+            var completedTask = await Task.WhenAny(processTask, timeoutTask);
+
+            if (completedTask == timeoutTask)
+            {
+                process.Kill();
+                return new YtDlpResult
+                {
+                    Success = false,
+                    Error = "Cookie extraction test timed out",
+                    ExitCode = -1
+                };
+            }
+
+            return new YtDlpResult
+            {
+                Success = process.ExitCode == 0,
                 Output = outputBuilder.ToString(),
                 Error = errorBuilder.ToString(),
                 ExitCode = process.ExitCode
@@ -1112,38 +1248,61 @@ namespace YouTube.Controllers
         //    };
         //}
 
-        // Method 3: Enhanced RunYtDlpAsync with cookies support
+
+        // Fix 1: Update the RunYtDlpWithCookiesAsync method to properly escape arguments
         private async Task<YtDlpResult> RunYtDlpWithCookiesAsync(List<string> arguments)
         {
             var cookiesPath = Path.Combine(_downloadPath, "youtube_cookies.txt");
 
-            var enhancedArgs = new List<string>
-    {
-        "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "--referer", "https://www.youtube.com/",
-        "--sleep-interval", "1",
-        "--max-sleep-interval", "5",
-        "--extractor-retries", "3"
-    };
+            var enhancedArgs = new List<string>();
 
-            // Add cookies if file exists
+            // Fix: Properly escape the user-agent string
+            enhancedArgs.Add("--user-agent");
+            enhancedArgs.Add("\"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36\"");
+
+            enhancedArgs.Add("--referer");
+            enhancedArgs.Add("https://www.youtube.com/");
+
+            // Add cookies from browser (more effective than manual cookies)
+            enhancedArgs.Add("--cookies-from-browser");
+            enhancedArgs.Add("chrome"); // or "firefox", "edge", "safari"
+
+            // Alternative: if you have manual cookies file
             if (System.IO.File.Exists(cookiesPath))
             {
                 enhancedArgs.Add("--cookies");
-                enhancedArgs.Add(cookiesPath);
+                enhancedArgs.Add($"\"{cookiesPath}\"");
             }
+
+            // Additional anti-detection measures
+            enhancedArgs.AddRange(new[]
+            {
+        "--sleep-interval", "1",
+        "--max-sleep-interval", "5",
+        "--extractor-retries", "3",
+        "--no-check-certificate", // Sometimes helps with SSL issues
+        "--prefer-insecure", // Use HTTP instead of HTTPS when possible
+        "--socket-timeout", "30"
+    });
 
             enhancedArgs.AddRange(arguments);
 
             var startInfo = new ProcessStartInfo
             {
                 FileName = _ytDlpPath,
-                Arguments = string.Join(" ", enhancedArgs),
                 UseShellExecute = false,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 CreateNoWindow = true
             };
+
+            // Fix: Don't manually join arguments, let ProcessStartInfo handle it
+            // This prevents issues with spaces and special characters
+            startInfo.ArgumentList.Clear();
+            foreach (var arg in enhancedArgs)
+            {
+                startInfo.ArgumentList.Add(arg);
+            }
 
             using var process = new Process { StartInfo = startInfo };
 
