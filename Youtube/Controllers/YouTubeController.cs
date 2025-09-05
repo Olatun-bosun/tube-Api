@@ -937,24 +937,29 @@ namespace YouTube.Controllers
 
             return quality.ToLower() switch
             {
-                // Specific resolutions with better fallback logic
-                "240p" => "worst[height<=240]/worst[height<=360]/worst",
-                "360p" => "best[height<=360][height>240]/best[height<=360]/best[height<=480][height>240]",
-                "480p" => "best[height<=480][height>360]/best[height<=480]/best[height<=720][height>360]",
-                "720p" => "best[height<=720][height>480]/best[height<=720]/best[height<=1080][height>480]",
-                "1080p" => "best[height<=1080][height>720]/best[height<=1080]/best[height<=1440][height>720]",
-                "1440p" => "best[height<=1440][height>1080]/best[height<=1440]/best[height>1080]",
-                "4k" => "best[height<=2160][height>1440]/best[height<=2160]/best[height>1440]",
+                // Use specific format IDs when possible, with fallbacks
+                "240p" => "394+140/278+140/160+140/worst[height<=240]/worst",
+                "360p" => "18/395+140/134+140/best[height=360]/best[height<=360]",
+                "480p" => "396+140/135+140/best[height=480]/best[height<=480]",
+                "720p" => "22/397+140/136+140/best[height=720]/best[height<=720]",
+                "1080p" => "398+140/137+140/best[height=1080]/best[height<=1080]",
+                "1440p" => "399+140/298+140/best[height=1440]/best[height<=1440]",
+                "4k" => "400+140/313+140/best[height=2160]/best[height<=2160]",
 
-                // More aggressive quality limiting
-                "small" => "worst[filesize<50M]/worst[height<=360]/worst",
-                "medium" => "best[height<=480][filesize<200M]/best[height<=480]",
-                "large" => "best[height<=1080][filesize<1G]/best[height<=1080]",
+                // Size-based alternatives (more reliable for getting different file sizes)
+                "tiny" => "worst[filesize<20M]/worst[height<=240]/worst",
+                "small" => "best[filesize<50M][height<=360]/worst[height<=480]",
+                "medium" => "best[filesize<150M][height<=480]/best[height<=480]",
+                "large" => "best[filesize<500M][height<=720]/best[height<=720]",
+                "xlarge" => "best[filesize<1000M][height<=1080]/best[height<=1080]",
+
+                // Bandwidth-based selection
+                "low-bandwidth" => "worst[abr<=64]/worst[height<=360]",
+                "high-bandwidth" => "best[abr>=128]/best[height>=720]",
 
                 // Audio only
                 "audio" => "bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio",
 
-                // Force specific formats
                 "worst" => "worst",
                 "best" => "best[ext=mp4]/best",
 
