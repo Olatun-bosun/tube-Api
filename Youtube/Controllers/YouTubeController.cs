@@ -939,12 +939,24 @@ namespace YouTube.Controllers
             {
                 "best" => "best[ext=mp4]/best",
                 "best-merge" => "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio",
-                "4k" => "best[height=2160][ext=mp4]/best[height=2160]",
-                "1440p" => "best[height=1440][ext=mp4]/best[height=1440]",
-                "1080p" => "best[height=1080][ext=mp4]/best[height<1080]",
-                "720p" => "best[height=720][ext=mp4]/best[height=720]",
-                "480p" => "best[height=480][ext=mp4]/best[height=480]",
-                "360p" => "best[height=360][ext=mp4]/best[height=360]",
+                // Try to get specific resolution, but be more aggressive about limiting quality
+                "240p" => "worst[height<=240][ext=mp4]/worst[height<=240]/worst[ext=mp4]/worst",
+                "360p" => "best[height<=360][height>=240][ext=mp4]/best[height<=360][ext=mp4]/worst[height>240]",
+                "480p" => "best[height<=480][height>=360][ext=mp4]/best[height<=480][ext=mp4]/best[height<=480]",
+                "720p" => "best[height<=720][height>=480][ext=mp4]/best[height<=720][ext=mp4]/best[height<=720]",
+                "1080p" => "best[height<=1080][height>=720][ext=mp4]/best[height<=1080][ext=mp4]/best[height<=1080]",
+                "1440p" => "best[height<=1440][height>=1080][ext=mp4]/best[height<=1440][ext=mp4]/best[height<=1440]",
+                "4k" => "best[height<=2160][height>=1440][ext=mp4]/best[height<=2160][ext=mp4]/best[height<=2160]",
+
+                // More explicit format selection
+                "small" => "worst[ext=mp4]/worst",
+                "medium" => "best[height<=480][ext=mp4]/best[height<=480]",
+                "large" => "best[height<=1080][ext=mp4]/best[height<=1080]",
+
+                // Audio only
+                "audio" => "bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio",
+
+                // Original options
                 "worst" => "worst[ext=mp4]/worst",
                 _ => "best[ext=mp4]/best"
             };
