@@ -106,7 +106,7 @@ namespace YouTube.Controllers
                             request.VideoUrl
                         });
 
-                var result = await RunYtDlpAsync(arguments);
+                var result = await RunYtDlpWithCookiesAsync(arguments);
 
                 if (!result.Success)
                 {
@@ -340,7 +340,7 @@ namespace YouTube.Controllers
             request.VideoUrl
         };
 
-                var result = await RunYtDlpAsync(arguments);
+                var result = await RunYtDlpWithCookiesAsync(arguments);
                 if (!result.Success)
                 {
                     return BadRequest($"Failed to get download URL: {result.Error}");
@@ -664,7 +664,7 @@ namespace YouTube.Controllers
             videoUrl
         };
 
-                var result = await RunYtDlpAsync(arguments);
+                var result = await RunYtDlpWithCookiesAsync(arguments);
                 if (!result.Success)
                 {
                     return BadRequest($"Failed to get formats: {result.Error}");
@@ -706,7 +706,7 @@ namespace YouTube.Controllers
             videoUrl
         };
 
-                var result = await RunYtDlpAsync(arguments);
+                var result = await RunYtDlpWithCookiesAsync(arguments);
 
                 object? formatDetails = null;
                 if (result.Success)
@@ -1051,7 +1051,7 @@ namespace YouTube.Controllers
                 videoUrl
             };
 
-            var result = await RunYtDlpAsync(arguments);
+            var result = await RunYtDlpWithCookiesAsync(arguments);
             if (!result.Success) return null;
 
             var videoInfo = JsonSerializer.Deserialize<JsonElement>(result.Output);
@@ -1071,13 +1071,74 @@ namespace YouTube.Controllers
             };
         }
 
-        // Keep existing helper methods...
-        private async Task<YtDlpResult> RunYtDlpAsync(List<string> arguments)
+        //// Keep existing helper methods...
+        //private async Task<YtDlpResult> RunYtDlpAsync(List<string> arguments)
+        //{
+        //    var startInfo = new ProcessStartInfo
+        //    {
+        //        FileName = _ytDlpPath,
+        //        Arguments = string.Join(" ", arguments),
+        //        UseShellExecute = false,
+        //        RedirectStandardOutput = true,
+        //        RedirectStandardError = true,
+        //        CreateNoWindow = true
+        //    };
+
+        //    using var process = new Process { StartInfo = startInfo };
+
+        //    var outputBuilder = new System.Text.StringBuilder();
+        //    var errorBuilder = new System.Text.StringBuilder();
+
+        //    process.OutputDataReceived += (sender, e) => {
+        //        if (e.Data != null) outputBuilder.AppendLine(e.Data);
+        //    };
+
+        //    process.ErrorDataReceived += (sender, e) => {
+        //        if (e.Data != null) errorBuilder.AppendLine(e.Data);
+        //    };
+
+        //    process.Start();
+        //    process.BeginOutputReadLine();
+        //    process.BeginErrorReadLine();
+
+        //    await process.WaitForExitAsync();
+
+        //    return new YtDlpResult
+        //    {
+        //        Success = process.ExitCode == 0,
+        //        Output = outputBuilder.ToString(),
+        //        Error = errorBuilder.ToString(),
+        //        ExitCode = process.ExitCode
+        //    };
+        //}
+
+        // Method 3: Enhanced RunYtDlpAsync with cookies support
+        private async Task<YtDlpResult> RunYtDlpWithCookiesAsync(List<string> arguments)
         {
+            var cookiesPath = Path.Combine(_downloadPath, "youtube_cookies.txt");
+
+            var enhancedArgs = new List<string>
+    {
+        "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "--referer", "https://www.youtube.com/",
+        "--sleep-interval", "1",
+        "--max-sleep-interval", "5",
+        "--extractor-retries", "3"
+    };
+
+            // Add cookies if file exists
+            if (System.IO.File.Exists(cookiesPath))
+            {
+                enhancedArgs.Add("--cookies");
+                enhancedArgs.Add(cookiesPath);
+            }
+
+            enhancedArgs.AddRange(arguments);
+
             var startInfo = new ProcessStartInfo
             {
                 FileName = _ytDlpPath,
-                Arguments = string.Join(" ", arguments),
+                Arguments = string.Join(" ", enhancedArgs),
                 UseShellExecute = false,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
@@ -1111,6 +1172,7 @@ namespace YouTube.Controllers
                 ExitCode = process.ExitCode
             };
         }
+
 
         private static string GetQualityFormat(string? quality)
         {
