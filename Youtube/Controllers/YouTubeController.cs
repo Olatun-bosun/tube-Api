@@ -775,6 +775,7 @@ namespace YouTube.Controllers
             };
         }
 
+
         private void ParseProgressUpdate(string output, DownloadSession session)
         {
             try
