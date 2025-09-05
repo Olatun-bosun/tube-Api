@@ -797,7 +797,7 @@ namespace YouTube.Controllers
             }
         }
 
-        // Fix 4: Update ProcessDownloadAsync to remove manual quoting
+        // Background download processing with progress tracking
         private async Task ProcessDownloadAsync(string sessionId, DownloadRequest request, string outputTemplate)
         {
             var session = _activeDownloads[sessionId];
@@ -808,32 +808,48 @@ namespace YouTube.Controllers
 
                 var arguments = new List<string>();
 
-                // FFmpeg path handling
+                // Debug: Log FFmpeg path
+                _logger.LogInformation("FFmpeg path from config: '{FFmpegPath}'", _ffmpegPath ?? "null");
+
+                // Fix: Use explicit FFmpeg path instead of relying on config
                 var ffmpegPath = "/usr/bin/ffmpeg";
+
+                // Check if FFmpeg exists before adding it
                 if (System.IO.File.Exists(ffmpegPath))
                 {
                     arguments.Add("--ffmpeg-location");
-                    arguments.Add(ffmpegPath); // Don't quote here, ArgumentList will handle it
+                    arguments.Add(ffmpegPath);
+                    _logger.LogInformation("Using FFmpeg at: {FFmpegPath}", ffmpegPath);
+                }
+                else
+                {
+                    _logger.LogWarning("FFmpeg not found at {FFmpegPath}, continuing without it", ffmpegPath);
                 }
 
+                // Fix: Ensure quality has a default value
                 var quality = request.Quality ?? "best";
+                _logger.LogInformation("Using quality: {Quality}", quality);
 
                 arguments.AddRange(new[]
                 {
-            "-f", GetQualityFormat(quality),
-            "-o", outputTemplate, // Don't quote here
-            "--no-playlist",
-            "--restrict-filenames",
-            "--merge-output-format", "mp4",
-            "--embed-metadata",
-            "--newline",
-            request.VideoUrl
-        });
+                    "-f", GetQualityFormat(quality),
+                    "-o", $"\"{outputTemplate}\"",
+                    "--no-playlist",
+                    "--restrict-filenames",
+                    "--merge-output-format", "mp4",
+                    "--embed-metadata",
+                    "--newline", // Each progress update on new line
+                    request.VideoUrl
+                });
+
+                // Debug: Log the complete command
+                _logger.LogInformation("yt-dlp command: {Command}", string.Join(" ", arguments));
 
                 await RunYtDlpWithProgressAsync(arguments, session);
 
                 if (session.Status != DownloadStatus.Cancelled)
                 {
+                    // Find downloaded file
                     var downloadedFiles = Directory.GetFiles(_downloadPath, $"{sessionId}_*");
                     if (downloadedFiles.Length > 0)
                     {
