@@ -87,13 +87,16 @@ namespace YouTube.Controllers
 
                 var baseArguments = new List<string>
         {
-            "-f", GetQualityFormat(request.Quality),
-            "-o", $"\"{outputTemplate}\"",
-            "--no-playlist",
-            "--restrict-filenames",
-            "--merge-output-format", "mp4",
-            "--embed-metadata",
-            request.VideoUrl
+           "--user-agent", "\"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36\"",
+    "--sleep-interval", "3",
+    "--retries", "5",
+    "-f", GetQualityFormat(request.Quality),
+    "-o", $"\"{outputTemplate}\"",
+    "--no-playlist",
+    "--restrict-filenames",
+    "--merge-output-format", "mp4",
+    "--embed-metadata",
+    request.VideoUrl
         };
 
                 // Use server-friendly fallback method
@@ -657,7 +660,20 @@ namespace YouTube.Controllers
                 session.Status = DownloadStatus.InProgress;
 
                 // Use the new method that includes cookie support
-                var arguments = BuildYtDlpArgumentsWithCookies(request, outputTemplate);
+                var arguments = new List<string>
+        {
+ "--user-agent", "\"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36\"",
+    "--sleep-interval", "3",
+    "--retries", "5",
+    "-f", GetQualityFormat(request.Quality),
+    "-o", $"\"{outputTemplate}\"",
+    "--no-playlist",
+    "--restrict-filenames",
+    "--merge-output-format", "mp4",
+    "--embed-metadata",
+    "--newline",
+    request.VideoUrl
+        }; ;
 
                 _logger.LogInformation("yt-dlp command: {Command}", string.Join(" ", arguments));
 
@@ -962,6 +978,8 @@ namespace YouTube.Controllers
 
                 "worst" => "worst",
                 "best" => "best[ext=mp4]/best",
+                "best-merge" => "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio",
+
 
                 _ => "best[ext=mp4]/best"
             };
