@@ -971,15 +971,33 @@ namespace YouTube.Controllers
 
             return quality.ToLower() switch
             {
+                // Strict quality matching - no fallback to higher quality
+                "4k" => "best[height<=2160][ext=mp4]/best[height<=2160]",
+                "1440p" => "best[height<=1440][ext=mp4]/best[height<=1440]",
+                "1080p" => "best[height<=1080][ext=mp4]/best[height<=1080]",
+                "720p" => "best[height<=720][ext=mp4]/best[height<=720]",
+                "480p" => "best[height<=480][ext=mp4]/best[height<=480]",
+                "360p" => "best[height<=360][ext=mp4]/best[height<=360]",
+                "240p" => "best[height<=240][ext=mp4]/best[height<=240]",
+
+                // Audio only
+                "audio" => "bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio",
+
+                // Size-based options
+                "small" => "worst[ext=mp4]/worst",
+                "medium" => "best[height<=720][ext=mp4]/best[height<=720]",
+                "large" => "best[height<=1080][ext=mp4]/best[height<=1080]",
+
+                // Bandwidth-conscious options
+                "low-bandwidth" => "worst[ext=mp4]/worst",
+                "mobile" => "best[height<=480][ext=mp4]/best[height<=480]",
+
+                // Original options (kept for compatibility)
                 "best" => "best[ext=mp4]/best",
                 "best-merge" => "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio",
-                "4k" => "best[height=2160][ext=mp4]/best[height=2160]",
-                "1440p" => "best[height=1440][ext=mp4]/best[height=1440]",
-                "1080p" => "best[height=1080][ext=mp4]/best[height<1080]",
-                "720p" => "best[height=720][ext=mp4]/best[height=720]",
-                "480p" => "best[height=480][ext=mp4]/best[height=480]",
-                "360p" => "best[height=360][ext=mp4]/best[height=360]",
                 "worst" => "worst[ext=mp4]/worst",
+
+                // Default fallback
                 _ => "best[ext=mp4]/best"
             };
         }
