@@ -66,6 +66,7 @@ namespace YouTube.Controllers
             }
         }
 
+        // Fix 1: Update your existing download method to handle Railway environment
         [HttpPost("download")]
         public async Task<IActionResult> DownloadVideo([FromQuery] DownloadRequest request)
         {
@@ -81,39 +82,44 @@ namespace YouTube.Controllers
                     return BadRequest("Invalid YouTube URL");
                 }
 
-                // Generate unique filename to avoid conflicts
+                // Clean the URL - remove playlist parameters that might cause issues
+                var cleanUrl = CleanYouTubeUrl(request.VideoUrl);
+
                 var sessionId = Guid.NewGuid().ToString("N")[..8];
                 var outputTemplate = Path.Combine(_downloadPath, $"{sessionId}_%(title)s.%(ext)s");
 
-                // Build yt-dlp command arguments for best quality
                 var arguments = new List<string>();
 
-                // Add FFmpeg path if configured (must be first)
-                if (!string.IsNullOrEmpty(_ffmpegPath))
-                {
-                    arguments.Add("--ffmpeg-location");
-                    arguments.Add($"\"{_ffmpegPath}\"");
-                }
+                // Don't add FFmpeg location in Railway - it's causing the warning
+                // Railway has FFmpeg installed, let yt-dlp find it automatically
 
                 arguments.AddRange(new[]
                 {
-                            "-f", GetQualityFormat(request.Quality),
-                            "-o", $"\"{outputTemplate}\"",
-                            "--no-playlist",
-                            "--restrict-filenames",
-                            "--merge-output-format", "mp4",
-                            "--embed-metadata",
-                            request.VideoUrl
-                        });
+            "-f", GetQualityFormat(request.Quality),
+            "-o", outputTemplate,
+            "--no-playlist",
+            "--restrict-filenames",
+            "--merge-output-format", "mp4",
+            "--embed-metadata",
+            
+            // Add anti-detection measures for Railway
+            "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+            "--referer", "https://www.youtube.com/",
+            "--sleep-interval", "2",
+            "--max-sleep-interval", "5",
+            "--extractor-retries", "3",
+            "--socket-timeout", "30",
 
-                var result = await RunYtDlpWithCookiesAsync(arguments);
+            cleanUrl
+        });
+
+                var result = await RunYtDlpWithArgumentListAsync(arguments);
 
                 if (!result.Success)
                 {
                     return BadRequest($"Download failed: {result.Error}");
                 }
 
-                // Find the downloaded file
                 var downloadedFiles = Directory.GetFiles(_downloadPath, $"{sessionId}_*");
                 if (downloadedFiles.Length == 0)
                 {
@@ -121,10 +127,9 @@ namespace YouTube.Controllers
                 }
 
                 var filePath = downloadedFiles[0];
-                var fileName = Path.GetFileName(filePath).Substring(9); // Remove session prefix
+                var fileName = Path.GetFileName(filePath).Substring(9);
                 var fileBytes = await System.IO.File.ReadAllBytesAsync(filePath);
 
-                // Clean up the file after reading
                 System.IO.File.Delete(filePath);
 
                 var contentType = GetContentType(Path.GetExtension(filePath));
@@ -135,6 +140,266 @@ namespace YouTube.Controllers
                 _logger.LogError(ex, "Error downloading video: {Url}", request.VideoUrl);
                 return StatusCode(500, $"Internal server error: {ex.Message}");
             }
+        }
+
+        // Fix 2: Clean YouTube URL to remove problematic parameters
+        private string CleanYouTubeUrl(string url)
+        {
+            try
+            {
+                var uri = new Uri(url);
+                var query = System.Web.HttpUtility.ParseQueryString(uri.Query);
+
+                // Keep only the video ID, remove playlist and other parameters
+                var videoId = query["v"];
+                if (!string.IsNullOrEmpty(videoId))
+                {
+                    return $"https://www.youtube.com/watch?v={videoId}";
+                }
+
+                // Handle youtu.be format
+                if (uri.Host.Contains("youtu.be"))
+                {
+                    var videoIdFromPath = uri.LocalPath.Trim('/');
+                    return $"https://www.youtube.com/watch?v={videoIdFromPath}";
+                }
+
+                return url; // Return original if can't parse
+            }
+            catch
+            {
+                return url; // Return original if parsing fails
+            }
+        }
+
+        // Fix 3: Create Railway-optimized yt-dlp runner
+        private async Task<YtDlpResult> RunYtDlpWithArgumentListAsync(List<string> arguments)
+        {
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = _ytDlpPath, // Should be "yt-dlp" in Railway
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true
+            };
+
+            // Use ArgumentList to avoid string parsing issues
+            startInfo.ArgumentList.Clear();
+            foreach (var arg in arguments)
+            {
+                startInfo.ArgumentList.Add(arg);
+            }
+
+            using var process = new Process { StartInfo = startInfo };
+
+            var outputBuilder = new System.Text.StringBuilder();
+            var errorBuilder = new System.Text.StringBuilder();
+
+            process.OutputDataReceived += (sender, e) => {
+                if (e.Data != null) outputBuilder.AppendLine(e.Data);
+            };
+
+            process.ErrorDataReceived += (sender, e) => {
+                if (e.Data != null) errorBuilder.AppendLine(e.Data);
+            };
+
+            process.Start();
+            process.BeginOutputReadLine();
+            process.BeginErrorReadLine();
+
+            await process.WaitForExitAsync();
+
+            return new YtDlpResult
+            {
+                Success = process.ExitCode == 0,
+                Output = outputBuilder.ToString(),
+                Error = errorBuilder.ToString(),
+                ExitCode = process.ExitCode
+            };
+        }
+
+        // Fix 4: Add Railway-specific diagnostics endpoint
+        [HttpGet("railway-status")]
+        public async Task<IActionResult> GetRailwayStatus()
+        {
+            try
+            {
+                var status = new
+                {
+                    environment = "Railway",
+                    downloadPath = _downloadPath,
+                    downloadPathExists = Directory.Exists(_downloadPath),
+                    ytDlpPath = _ytDlpPath,
+
+                    // Check if yt-dlp is accessible
+                    ytDlpAccessible = await CheckCommand("yt-dlp", "--version"),
+
+                    // Check FFmpeg without specifying path
+                    ffmpegAccessible = await CheckCommand("ffmpeg", "-version"),
+
+                    // Test with a simple, likely unblocked video
+                    testVideoResult = await TestSimpleVideo(),
+
+                    railwayInfo = new
+                    {
+                        region = Environment.GetEnvironmentVariable("RAILWAY_REGION") ?? "unknown",
+                        service = Environment.GetEnvironmentVariable("RAILWAY_SERVICE_NAME") ?? "unknown",
+                        deployment = Environment.GetEnvironmentVariable("RAILWAY_DEPLOYMENT_ID") ?? "unknown"
+                    }
+                };
+
+                return Ok(status);
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, $"Status check failed: {ex.Message}");
+            }
+        }
+
+        private async Task<bool> CheckCommand(string command, string args)
+        {
+            try
+            {
+                var startInfo = new ProcessStartInfo
+                {
+                    FileName = command,
+                    Arguments = args,
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    CreateNoWindow = true
+                };
+
+                using var process = new Process { StartInfo = startInfo };
+                process.Start();
+                await process.WaitForExitAsync();
+
+                return process.ExitCode == 0;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private async Task<object> TestSimpleVideo()
+        {
+            try
+            {
+                // Test with a simple video info extraction (no download)
+                var testArgs = new List<string>
+        {
+            "--dump-json",
+            "--no-playlist",
+            "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "--referer", "https://www.youtube.com/",
+            "https://www.youtube.com/watch?v=jNQXAC9IVRw" // Different test video
+        };
+
+                var result = await RunYtDlpWithArgumentListAsync(testArgs);
+
+                return new
+                {
+                    success = result.Success,
+                    error = result.Success ? null : result.Error?.Substring(0, Math.Min(500, result.Error.Length))
+                };
+            }
+            catch (Exception ex)
+            {
+                return new { success = false, error = ex.Message };
+            }
+        }
+
+        // Fix 5: Alternative download method that tries different approaches
+        [HttpPost("download-alternative")]
+        public async Task<IActionResult> DownloadVideoAlternative([FromBody] DownloadRequest request)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(request.VideoUrl) || !IsValidYouTubeUrl(request.VideoUrl))
+                {
+                    return BadRequest("Invalid YouTube URL");
+                }
+
+                var cleanUrl = CleanYouTubeUrl(request.VideoUrl);
+                var sessionId = Guid.NewGuid().ToString("N")[..8];
+                var outputTemplate = Path.Combine(_downloadPath, $"{sessionId}_%(title)s.%(ext)s");
+
+                // Strategy 1: Try with minimal arguments first
+                var minimalArgs = new List<string>
+        {
+            "--no-playlist",
+            "--restrict-filenames",
+            "-o", outputTemplate,
+            cleanUrl
+        };
+
+                var result = await RunYtDlpWithArgumentListAsync(minimalArgs);
+
+                if (result.Success)
+                {
+                    return await ReturnFirstDownloadedFile(sessionId);
+                }
+
+                // Strategy 2: Try with audio-only format (often works when video is blocked)
+                var audioArgs = new List<string>
+        {
+            "-f", "bestaudio[ext=m4a]/bestaudio",
+            "--no-playlist",
+            "--restrict-filenames",
+            "-o", outputTemplate.Replace(".%(ext)s", "_audio.%(ext)s"),
+            cleanUrl
+        };
+
+                var audioResult = await RunYtDlpWithArgumentListAsync(audioArgs);
+
+                if (audioResult.Success)
+                {
+                    return await ReturnFirstDownloadedFile(sessionId, "_audio");
+                }
+
+                // Both strategies failed
+                return BadRequest(new
+                {
+                    error = "All download strategies failed",
+                    videoStrategy = result.Error,
+                    audioStrategy = audioResult.Error,
+                    suggestion = "This video may be geo-blocked or restricted. Try a different video."
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Alternative download failed: {Url}", request.VideoUrl);
+                return StatusCode(500, $"Download error: {ex.Message}");
+            }
+        }
+
+        private async Task<IActionResult> ReturnFirstDownloadedFile(string sessionId, string suffix = "")
+        {
+            var searchPattern = string.IsNullOrEmpty(suffix) ? $"{sessionId}_*" : $"{sessionId}{suffix}_*";
+            var downloadedFiles = Directory.GetFiles(_downloadPath, searchPattern);
+
+            if (downloadedFiles.Length == 0)
+            {
+                return NotFound("Downloaded file not found");
+            }
+
+            var filePath = downloadedFiles[0];
+            var fileName = Path.GetFileName(filePath);
+
+            // Remove session ID from filename
+            var prefixLength = sessionId.Length + (string.IsNullOrEmpty(suffix) ? 1 : suffix.Length + 1);
+            if (fileName.Length > prefixLength)
+            {
+                fileName = fileName.Substring(prefixLength);
+            }
+
+            var fileBytes = await System.IO.File.ReadAllBytesAsync(filePath);
+            System.IO.File.Delete(filePath);
+
+            var contentType = GetContentType(Path.GetExtension(filePath));
+            return File(fileBytes, contentType, fileName);
         }
 
 
