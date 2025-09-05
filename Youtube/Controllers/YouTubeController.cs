@@ -106,7 +106,7 @@ namespace YouTube.Controllers
                             request.VideoUrl
                         });
 
-                var result = await RunYtDlpAsync(arguments);
+                var result = await RunYtDlpWithCookiesAsync(arguments);
 
                 if (!result.Success)
                 {
@@ -200,9 +200,9 @@ namespace YouTube.Controllers
                 var contentType = GetContentType(Path.GetExtension(session.FilePath));
                 var fileInfo = new FileInfo(session.FilePath);
 
-                // Set response headers
-                Response.Headers.Add("Content-Disposition", $"attachment; filename=\"{fileName}\"");
-                Response.Headers.Add("Content-Length", fileInfo.Length.ToString());
+                // Fix: Use indexer instead of Add method to avoid duplicate key errors
+                Response.Headers["Content-Disposition"] = $"attachment; filename=\"{fileName}\"";
+                Response.Headers["Content-Length"] = fileInfo.Length.ToString();
                 Response.ContentType = contentType;
 
                 // Stream file directly to response
@@ -268,18 +268,24 @@ namespace YouTube.Controllers
         //    }
         //}
 
-        // New method to stream yt-dlp output directly to HTTP response
+        // Fix 7: Also fix the other header warning
         private async Task<IActionResult> StreamYtDlpToResponse(List<string> arguments, string fileName)
         {
             var startInfo = new ProcessStartInfo
             {
                 FileName = _ytDlpPath,
-                Arguments = string.Join(" ", arguments),
                 UseShellExecute = false,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 CreateNoWindow = true
             };
+
+            // Use ArgumentList
+            startInfo.ArgumentList.Clear();
+            foreach (var arg in arguments)
+            {
+                startInfo.ArgumentList.Add(arg);
+            }
 
             var process = new Process { StartInfo = startInfo };
 
@@ -287,13 +293,11 @@ namespace YouTube.Controllers
             {
                 process.Start();
 
-                // Set response headers for download
-                Response.Headers.Add("Content-Disposition", $"attachment; filename=\"{fileName}\"");
+                // Fix: Use indexer instead of Add
+                Response.Headers["Content-Disposition"] = $"attachment; filename=\"{fileName}\"";
                 Response.ContentType = "application/octet-stream";
 
-                // Stream the output directly to response
                 await process.StandardOutput.BaseStream.CopyToAsync(Response.Body);
-
                 await process.WaitForExitAsync();
 
                 if (process.ExitCode != 0)
@@ -340,7 +344,7 @@ namespace YouTube.Controllers
             request.VideoUrl
         };
 
-                var result = await RunYtDlpAsync(arguments);
+                var result = await RunYtDlpWithCookiesAsync(arguments);
                 if (!result.Success)
                 {
                     return BadRequest($"Failed to get download URL: {result.Error}");
@@ -645,8 +649,159 @@ namespace YouTube.Controllers
                 return StatusCode(500, $"Error getting video info: {ex.Message}");
             }
         }
+        // Add this new endpoint to test what formats are actually available
+        [HttpGet("debug-formats")]
+        public async Task<IActionResult> DebugAvailableFormats([FromQuery] string videoUrl)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(videoUrl) || !IsValidYouTubeUrl(videoUrl))
+                {
+                    return BadRequest("Invalid YouTube URL");
+                }
 
-        // Background download processing with progress tracking
+                // Get all available formats with detailed info
+                var arguments = new List<string>
+        {
+            "-F", // List all available formats
+            "--no-playlist",
+            videoUrl
+        };
+
+                var result = await RunYtDlpWithCookiesAsync(arguments);
+                if (!result.Success)
+                {
+                    return BadRequest($"Failed to get formats: {result.Error}");
+                }
+
+                return Ok(new
+                {
+                    videoUrl = videoUrl,
+                    availableFormats = result.Output,
+                    debugInfo = "Use this to see what formats are actually available for this video"
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error getting debug formats for: {Url}", videoUrl);
+                return StatusCode(500, $"Error: {ex.Message}");
+            }
+        }
+
+        // Enhanced test method to validate format selection and file sizes
+        [HttpGet("test-quality")]
+        public async Task<IActionResult> TestQualitySelection([FromQuery] string videoUrl, [FromQuery] string quality = "720p")
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(videoUrl) || !IsValidYouTubeUrl(videoUrl))
+                {
+                    return BadRequest("Invalid YouTube URL");
+                }
+
+                var formatString = GetQualityFormat(quality);
+
+                // Test what format would be selected with file size info
+                var arguments = new List<string>
+        {
+            "-f", formatString,
+            "--dump-json",
+            "--no-playlist",
+            videoUrl
+        };
+
+                var result = await RunYtDlpWithCookiesAsync(arguments);
+
+                object? formatDetails = null;
+                if (result.Success)
+                {
+                    try
+                    {
+                        var json = JsonSerializer.Deserialize<JsonElement>(result.Output);
+
+                        // Handle both single format and merged format responses
+                        if (json.ValueKind == JsonValueKind.Array)
+                        {
+                            // Multiple formats (video + audio merge)
+                            var formats = new List<object>();
+                            long totalSize = 0;
+
+                            foreach (var format in json.EnumerateArray())
+                            {
+                                var size = GetJsonLong(format, "filesize") + GetJsonLong(format, "filesize_approx");
+                                totalSize += size;
+
+                                formats.Add(new
+                                {
+                                    formatId = GetJsonString(format, "format_id"),
+                                    resolution = GetJsonString(format, "resolution"),
+                                    width = GetJsonInt(format, "width"),
+                                    height = GetJsonInt(format, "height"),
+                                    filesize = size,
+                                    formatNote = GetJsonString(format, "format_note"),
+                                    vcodec = GetJsonString(format, "vcodec"),
+                                    acodec = GetJsonString(format, "acodec"),
+                                    ext = GetJsonString(format, "ext")
+                                });
+                            }
+
+                            formatDetails = new
+                            {
+                                type = "merged",
+                                formats = formats,
+                                totalEstimatedSize = totalSize,
+                                totalEstimatedSizeMB = Math.Round(totalSize / (1024.0 * 1024.0), 2)
+                            };
+                        }
+                        else
+                        {
+                            // Single format
+                            var size = GetJsonLong(json, "filesize") + GetJsonLong(json, "filesize_approx");
+                            formatDetails = new
+                            {
+                                type = "single",
+                                formatId = GetJsonString(json, "format_id"),
+                                resolution = GetJsonString(json, "resolution"),
+                                width = GetJsonInt(json, "width"),
+                                height = GetJsonInt(json, "height"),
+                                filesize = size,
+                                filesizeMB = Math.Round(size / (1024.0 * 1024.0), 2),
+                                formatNote = GetJsonString(json, "format_note"),
+                                vcodec = GetJsonString(json, "vcodec"),
+                                acodec = GetJsonString(json, "acodec"),
+                                ext = GetJsonString(json, "ext")
+                            };
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Failed to parse format details");
+                        formatDetails = new { error = ex.Message, rawOutput = result.Output };
+                    }
+                }
+
+                return Ok(new
+                {
+                    requestedQuality = quality,
+                    formatString = formatString,
+                    success = result.Success,
+                    error = result.Error,
+                    formatDetails = formatDetails,
+                    instructions = new
+                    {
+                        message = "Check the filesizeMB or totalEstimatedSizeMB values",
+                        note = "Different qualities should show different file sizes now"
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error testing quality selection: {Url}", videoUrl);
+                return StatusCode(500, $"Error: {ex.Message}");
+            }
+        }
+
+        // Fix 1: Update ProcessDownloadAsync to handle Docker environment properly
         private async Task ProcessDownloadAsync(string sessionId, DownloadRequest request, string outputTemplate)
         {
             var session = _activeDownloads[sessionId];
@@ -657,48 +812,57 @@ namespace YouTube.Controllers
 
                 var arguments = new List<string>();
 
-                // Debug: Log FFmpeg path
-                _logger.LogInformation("FFmpeg path from config: '{FFmpegPath}'", _ffmpegPath ?? "null");
+                // Fix: Find FFmpeg in Docker environment
+                var possibleFFmpegPaths = new[]
+                {
+            "/usr/bin/ffmpeg",
+            "/usr/local/bin/ffmpeg",
+            "/app/ffmpeg",
+            "ffmpeg" // Let system find it
+        };
 
-                // Fix: Use explicit FFmpeg path instead of relying on config
-                var ffmpegPath = "/usr/bin/ffmpeg";
+                string? workingFFmpegPath = null;
+                foreach (var path in possibleFFmpegPaths)
+                {
+                    if (path == "ffmpeg" || System.IO.File.Exists(path))
+                    {
+                        workingFFmpegPath = path;
+                        break;
+                    }
+                }
 
-                // Check if FFmpeg exists before adding it
-                if (System.IO.File.Exists(ffmpegPath))
+                if (workingFFmpegPath != null)
                 {
                     arguments.Add("--ffmpeg-location");
-                    arguments.Add(ffmpegPath);
-                    _logger.LogInformation("Using FFmpeg at: {FFmpegPath}", ffmpegPath);
+                    arguments.Add(workingFFmpegPath);
+                    _logger.LogInformation("Using FFmpeg at: {FFmpegPath}", workingFFmpegPath);
                 }
                 else
                 {
-                    _logger.LogWarning("FFmpeg not found at {FFmpegPath}, continuing without it", ffmpegPath);
+                    _logger.LogWarning("FFmpeg not found at any expected location, continuing without it");
                 }
 
-                // Fix: Ensure quality has a default value
                 var quality = request.Quality ?? "best";
                 _logger.LogInformation("Using quality: {Quality}", quality);
 
                 arguments.AddRange(new[]
                 {
-                    "-f", GetQualityFormat(quality),
-                    "-o", $"\"{outputTemplate}\"",
-                    "--no-playlist",
-                    "--restrict-filenames",
-                    "--merge-output-format", "mp4",
-                    "--embed-metadata",
-                    "--newline", // Each progress update on new line
-                    request.VideoUrl
-                });
+            "-f", GetQualityFormat(quality),
+            "-o", outputTemplate,
+            "--no-playlist",
+            "--restrict-filenames",
+            "--merge-output-format", "mp4",
+            "--embed-metadata",
+            "--newline",
+            request.VideoUrl
+        });
 
-                // Debug: Log the complete command
-                _logger.LogInformation("yt-dlp command: {Command}", string.Join(" ", arguments));
+                _logger.LogInformation("yt-dlp command args: {Args}", string.Join(" ", arguments));
 
                 await RunYtDlpWithProgressAsync(arguments, session);
 
                 if (session.Status != DownloadStatus.Cancelled)
                 {
-                    // Find downloaded file
                     var downloadedFiles = Directory.GetFiles(_downloadPath, $"{sessionId}_*");
                     if (downloadedFiles.Length > 0)
                     {
@@ -721,17 +885,53 @@ namespace YouTube.Controllers
             }
         }
 
+
+        // Supporting class for cookie setup
+        public class CookieSetupRequest
+        {
+            public string Browser { get; set; } = "chrome";
+        }
+
+        // Fix 2: Update the RunYtDlpWithProgressAsync method similarly
         private async Task<YtDlpResult> RunYtDlpWithProgressAsync(List<string> arguments, DownloadSession session)
         {
+            // Apply the same cookie and anti-detection measures
+            var enhancedArgs = new List<string>();
+
+            enhancedArgs.Add("--user-agent");
+            enhancedArgs.Add("\"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36\"");
+
+            enhancedArgs.Add("--referer");
+            enhancedArgs.Add("https://www.youtube.com/");
+
+            enhancedArgs.Add("--cookies-from-browser");
+            enhancedArgs.Add("chrome");
+
+            enhancedArgs.AddRange(new[]
+            {
+        "--sleep-interval", "1",
+        "--max-sleep-interval", "5",
+        "--extractor-retries", "3",
+        "--socket-timeout", "30"
+    });
+
+            enhancedArgs.AddRange(arguments);
+
             var startInfo = new ProcessStartInfo
             {
                 FileName = _ytDlpPath,
-                Arguments = string.Join(" ", arguments),
                 UseShellExecute = false,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 CreateNoWindow = true
             };
+
+            // Use ArgumentList instead of Arguments string
+            startInfo.ArgumentList.Clear();
+            foreach (var arg in enhancedArgs)
+            {
+                startInfo.ArgumentList.Add(arg);
+            }
 
             using var process = new Process { StartInfo = startInfo };
 
@@ -901,7 +1101,7 @@ namespace YouTube.Controllers
                 videoUrl
             };
 
-            var result = await RunYtDlpAsync(arguments);
+            var result = await RunYtDlpWithCookiesAsync(arguments);
             if (!result.Success) return null;
 
             var videoInfo = JsonSerializer.Deserialize<JsonElement>(result.Output);
@@ -921,18 +1121,97 @@ namespace YouTube.Controllers
             };
         }
 
-        // Keep existing helper methods...
-        private async Task<YtDlpResult> RunYtDlpAsync(List<string> arguments)
+        //// Keep existing helper methods...
+        //private async Task<YtDlpResult> RunYtDlpAsync(List<string> arguments)
+        //{
+        //    var startInfo = new ProcessStartInfo
+        //    {
+        //        FileName = _ytDlpPath,
+        //        Arguments = string.Join(" ", arguments),
+        //        UseShellExecute = false,
+        //        RedirectStandardOutput = true,
+        //        RedirectStandardError = true,
+        //        CreateNoWindow = true
+        //    };
+
+        //    using var process = new Process { StartInfo = startInfo };
+
+        //    var outputBuilder = new System.Text.StringBuilder();
+        //    var errorBuilder = new System.Text.StringBuilder();
+
+        //    process.OutputDataReceived += (sender, e) => {
+        //        if (e.Data != null) outputBuilder.AppendLine(e.Data);
+        //    };
+
+        //    process.ErrorDataReceived += (sender, e) => {
+        //        if (e.Data != null) errorBuilder.AppendLine(e.Data);
+        //    };
+
+        //    process.Start();
+        //    process.BeginOutputReadLine();
+        //    process.BeginErrorReadLine();
+
+        //    await process.WaitForExitAsync();
+
+        //    return new YtDlpResult
+        //    {
+        //        Success = process.ExitCode == 0,
+        //        Output = outputBuilder.ToString(),
+        //        Error = errorBuilder.ToString(),
+        //        ExitCode = process.ExitCode
+        //    };
+        //}
+
+
+        // Fix 2: Update RunYtDlpWithCookiesAsync for Docker (no browser cookies available)
+        private async Task<YtDlpResult> RunYtDlpWithCookiesAsync(List<string> arguments)
         {
+            var enhancedArgs = new List<string>();
+
+            // Docker-compatible anti-detection measures (no browser cookies)
+            enhancedArgs.Add("--user-agent");
+            enhancedArgs.Add("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
+
+            enhancedArgs.Add("--referer");
+            enhancedArgs.Add("https://www.youtube.com/");
+
+            // Add headers to mimic real browser behavior
+            enhancedArgs.Add("--add-header");
+            enhancedArgs.Add("Accept:text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8");
+
+            enhancedArgs.Add("--add-header");
+            enhancedArgs.Add("Accept-Language:en-US,en;q=0.9");
+
+            enhancedArgs.Add("--add-header");
+            enhancedArgs.Add("Accept-Encoding:gzip, deflate, br");
+
+            // Network and retry settings
+            enhancedArgs.AddRange(new[]
+            {
+        "--sleep-interval", "1",
+        "--max-sleep-interval", "5",
+        "--extractor-retries", "3",
+        "--socket-timeout", "30",
+        "--fragment-retries", "10"
+    });
+
+            enhancedArgs.AddRange(arguments);
+
             var startInfo = new ProcessStartInfo
             {
                 FileName = _ytDlpPath,
-                Arguments = string.Join(" ", arguments),
                 UseShellExecute = false,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 CreateNoWindow = true
             };
+
+            // Use ArgumentList for proper escaping
+            startInfo.ArgumentList.Clear();
+            foreach (var arg in enhancedArgs)
+            {
+                startInfo.ArgumentList.Add(arg);
+            }
 
             using var process = new Process { StartInfo = startInfo };
 
@@ -972,15 +1251,34 @@ namespace YouTube.Controllers
 
             return quality.ToLower() switch
             {
+                // Try to get specific resolution, but be more aggressive about limiting quality
+                "240p" => "worst[height<=240][ext=mp4]/worst[height<=240]/worst[ext=mp4]/worst",
+                "360p" => "best[height<=360][height>=240][ext=mp4]/best[height<=360][ext=mp4]/worst[height>240]",
+                "480p" => "best[height<=480][height>=360][ext=mp4]/best[height<=480][ext=mp4]/best[height<=480]",
+                "720p" => "best[height<=720][height>=480][ext=mp4]/best[height<=720][ext=mp4]/best[height<=720]",
+                "1080p" => "best[height<=1080][height>=720][ext=mp4]/best[height<=1080][ext=mp4]/best[height<=1080]",
+                "1440p" => "best[height<=1440][height>=1080][ext=mp4]/best[height<=1440][ext=mp4]/best[height<=1440]",
+                "4k" => "best[height<=2160][height>=1440][ext=mp4]/best[height<=2160][ext=mp4]/best[height<=2160]",
+
+                // More explicit format selection
+                "small" => "worst[ext=mp4]/worst",
+                "medium" => "best[height<=480][ext=mp4]/best[height<=480]",
+                "large" => "best[height<=1080][ext=mp4]/best[height<=1080]",
+
+                // Audio only
+                "audio" => "bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio",
+
+
+                // Bandwidth-conscious options
+                "low-bandwidth" => "worst[ext=mp4]/worst",
+                "mobile" => "best[height<=480][ext=mp4]/best[height<=480]",
+
+                // Original options (kept for compatibility)
                 "best" => "best[ext=mp4]/best",
                 "best-merge" => "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio",
-                "4k" => "best[height=2160][ext=mp4]/best[height=2160]",
-                "1440p" => "best[height=1440][ext=mp4]/best[height=1440]",
-                "1080p" => "best[height=1080][ext=mp4]/best[height<1080]",
-                "720p" => "best[height=720][ext=mp4]/best[height=720]",
-                "480p" => "best[height=480][ext=mp4]/best[height=480]",
-                "360p" => "best[height=360][ext=mp4]/best[height=360]",
                 "worst" => "worst[ext=mp4]/worst",
+
+                // Default fallback
                 _ => "best[ext=mp4]/best"
             };
         }
