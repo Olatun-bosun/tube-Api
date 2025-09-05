@@ -200,9 +200,9 @@ namespace YouTube.Controllers
                 var contentType = GetContentType(Path.GetExtension(session.FilePath));
                 var fileInfo = new FileInfo(session.FilePath);
 
-                // Set response headers
-                Response.Headers.Add("Content-Disposition", $"attachment; filename=\"{fileName}\"");
-                Response.Headers.Add("Content-Length", fileInfo.Length.ToString());
+                // Fix: Use indexer instead of Add method to avoid duplicate key errors
+                Response.Headers["Content-Disposition"] = $"attachment; filename=\"{fileName}\"";
+                Response.Headers["Content-Length"] = fileInfo.Length.ToString();
                 Response.ContentType = contentType;
 
                 // Stream file directly to response
@@ -268,18 +268,24 @@ namespace YouTube.Controllers
         //    }
         //}
 
-        // New method to stream yt-dlp output directly to HTTP response
+        // Fix 7: Also fix the other header warning
         private async Task<IActionResult> StreamYtDlpToResponse(List<string> arguments, string fileName)
         {
             var startInfo = new ProcessStartInfo
             {
                 FileName = _ytDlpPath,
-                Arguments = string.Join(" ", arguments),
                 UseShellExecute = false,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 CreateNoWindow = true
             };
+
+            // Use ArgumentList
+            startInfo.ArgumentList.Clear();
+            foreach (var arg in arguments)
+            {
+                startInfo.ArgumentList.Add(arg);
+            }
 
             var process = new Process { StartInfo = startInfo };
 
@@ -287,13 +293,11 @@ namespace YouTube.Controllers
             {
                 process.Start();
 
-                // Set response headers for download
-                Response.Headers.Add("Content-Disposition", $"attachment; filename=\"{fileName}\"");
+                // Fix: Use indexer instead of Add
+                Response.Headers["Content-Disposition"] = $"attachment; filename=\"{fileName}\"";
                 Response.ContentType = "application/octet-stream";
 
-                // Stream the output directly to response
                 await process.StandardOutput.BaseStream.CopyToAsync(Response.Body);
-
                 await process.WaitForExitAsync();
 
                 if (process.ExitCode != 0)
@@ -797,7 +801,7 @@ namespace YouTube.Controllers
             }
         }
 
-        // Background download processing with progress tracking
+        // Fix 1: Update ProcessDownloadAsync to handle Docker environment properly
         private async Task ProcessDownloadAsync(string sessionId, DownloadRequest request, string outputTemplate)
         {
             var session = _activeDownloads[sessionId];
@@ -808,48 +812,57 @@ namespace YouTube.Controllers
 
                 var arguments = new List<string>();
 
-                // Debug: Log FFmpeg path
-                _logger.LogInformation("FFmpeg path from config: '{FFmpegPath}'", _ffmpegPath ?? "null");
+                // Fix: Find FFmpeg in Docker environment
+                var possibleFFmpegPaths = new[]
+                {
+            "/usr/bin/ffmpeg",
+            "/usr/local/bin/ffmpeg",
+            "/app/ffmpeg",
+            "ffmpeg" // Let system find it
+        };
 
-                // Fix: Use explicit FFmpeg path instead of relying on config
-                var ffmpegPath = "/usr/bin/ffmpeg";
+                string? workingFFmpegPath = null;
+                foreach (var path in possibleFFmpegPaths)
+                {
+                    if (path == "ffmpeg" || System.IO.File.Exists(path))
+                    {
+                        workingFFmpegPath = path;
+                        break;
+                    }
+                }
 
-                // Check if FFmpeg exists before adding it
-                if (System.IO.File.Exists(ffmpegPath))
+                if (workingFFmpegPath != null)
                 {
                     arguments.Add("--ffmpeg-location");
-                    arguments.Add(ffmpegPath);
-                    _logger.LogInformation("Using FFmpeg at: {FFmpegPath}", ffmpegPath);
+                    arguments.Add(workingFFmpegPath);
+                    _logger.LogInformation("Using FFmpeg at: {FFmpegPath}", workingFFmpegPath);
                 }
                 else
                 {
-                    _logger.LogWarning("FFmpeg not found at {FFmpegPath}, continuing without it", ffmpegPath);
+                    _logger.LogWarning("FFmpeg not found at any expected location, continuing without it");
                 }
 
-                // Fix: Ensure quality has a default value
                 var quality = request.Quality ?? "best";
                 _logger.LogInformation("Using quality: {Quality}", quality);
 
                 arguments.AddRange(new[]
                 {
-                    "-f", GetQualityFormat(quality),
-                    "-o", $"\"{outputTemplate}\"",
-                    "--no-playlist",
-                    "--restrict-filenames",
-                    "--merge-output-format", "mp4",
-                    "--embed-metadata",
-                    "--newline", // Each progress update on new line
-                    request.VideoUrl
-                });
+            "-f", GetQualityFormat(quality),
+            "-o", outputTemplate,
+            "--no-playlist",
+            "--restrict-filenames",
+            "--merge-output-format", "mp4",
+            "--embed-metadata",
+            "--newline",
+            request.VideoUrl
+        });
 
-                // Debug: Log the complete command
-                _logger.LogInformation("yt-dlp command: {Command}", string.Join(" ", arguments));
+                _logger.LogInformation("yt-dlp command args: {Args}", string.Join(" ", arguments));
 
                 await RunYtDlpWithProgressAsync(arguments, session);
 
                 if (session.Status != DownloadStatus.Cancelled)
                 {
-                    // Find downloaded file
                     var downloadedFiles = Directory.GetFiles(_downloadPath, $"{sessionId}_*");
                     if (downloadedFiles.Length > 0)
                     {
@@ -871,6 +884,7 @@ namespace YouTube.Controllers
                 _logger.LogError(ex, "Download failed for session {SessionId}", sessionId);
             }
         }
+
 
         // Supporting class for cookie setup
         public class CookieSetupRequest
@@ -961,27 +975,20 @@ namespace YouTube.Controllers
             };
         }
 
-        // Fix 3: Add a method to set up cookies from browser
+        // Fix 4: Remove or modify cookie setup endpoint for Docker
         [HttpPost("setup-cookies")]
         public async Task<IActionResult> SetupCookies([FromBody] CookieSetupRequest request)
         {
             try
             {
-                var browser = request.Browser?.ToLower() ?? "chrome";
-                var validBrowsers = new[] { "chrome", "firefox", "edge", "safari", "opera" };
-
-                if (!validBrowsers.Contains(browser))
-                {
-                    return BadRequest($"Invalid browser. Supported browsers: {string.Join(", ", validBrowsers)}");
-                }
-
-                // Test if yt-dlp can extract cookies from the specified browser
+                // In Docker, we can't access browser cookies, so we test without them
                 var testArgs = new List<string>
         {
-            "--cookies-from-browser", browser,
             "--dump-json",
             "--no-playlist",
-            "https://www.youtube.com/watch?v=dQw4w9WgXcQ" // Test video
+            "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "--referer", "https://www.youtube.com/",
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
         };
 
                 var result = await RunYtDlpTestAsync(testArgs);
@@ -990,31 +997,130 @@ namespace YouTube.Controllers
                 {
                     return Ok(new
                     {
-                        message = $"Successfully configured cookies from {browser}",
-                        browser = browser,
-                        status = "ready"
+                        message = "YouTube API access test successful (Docker mode - no browser cookies)",
+                        mode = "docker",
+                        status = "ready",
+                        note = "Running in Docker environment without browser cookie support"
                     });
                 }
                 else
                 {
                     return BadRequest(new
                     {
-                        message = $"Failed to extract cookies from {browser}",
+                        message = "YouTube API access test failed",
                         error = result.Error,
+                        mode = "docker",
                         suggestions = new[]
                         {
-                    $"Make sure {browser} is installed and you're logged into YouTube",
-                    "Try logging out and back into YouTube in your browser",
-                    "Close all browser instances and try again",
-                    "Try a different browser"
+                    "YouTube may be rate limiting or blocking requests",
+                    "Try using a VPN or different server location",
+                    "Consider implementing proxy rotation",
+                    "Try updating yt-dlp to the latest version"
                 }
                     });
                 }
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error setting up cookies");
-                return StatusCode(500, $"Error setting up cookies: {ex.Message}");
+                _logger.LogError(ex, "Error testing YouTube access");
+                return StatusCode(500, $"Error testing YouTube access: {ex.Message}");
+            }
+        }
+
+        // Fix 5: Add Docker diagnostics endpoint
+        [HttpGet("docker-diagnostics")]
+        public async Task<IActionResult> DockerDiagnostics()
+        {
+            try
+            {
+                var diagnostics = new
+                {
+                    environment = "Docker",
+                    downloadPath = _downloadPath,
+                    downloadPathExists = Directory.Exists(_downloadPath),
+                    ytDlpPath = _ytDlpPath,
+                    ytDlpExists = CheckCommandExists(_ytDlpPath),
+                    ffmpegPaths = new
+                    {
+                        configured = _ffmpegPath ?? "null",
+                        usrBin = System.IO.File.Exists("/usr/bin/ffmpeg"),
+                        usrLocalBin = System.IO.File.Exists("/usr/local/bin/ffmpeg"),
+                        systemPath = CheckCommandExists("ffmpeg")
+                    },
+                    systemInfo = new
+                    {
+                        workingDirectory = Directory.GetCurrentDirectory(),
+                        tempPath = Path.GetTempPath(),
+                        containerUser = Environment.UserName,
+                        environmentVariables = Environment.GetEnvironmentVariables()
+                            .Cast<System.Collections.DictionaryEntry>()
+                            .Where(e => e.Key.ToString()?.Contains("PATH") == true ||
+                                       e.Key.ToString()?.Contains("HOME") == true ||
+                                       e.Key.ToString()?.Contains("USER") == true)
+                            .ToDictionary(e => e.Key.ToString()!, e => e.Value?.ToString())
+                    },
+                    ytDlpVersion = await GetYtDlpVersion()
+                };
+
+                return Ok(diagnostics);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error running Docker diagnostics");
+                return StatusCode(500, $"Diagnostics error: {ex.Message}");
+            }
+        }
+
+        // Helper methods
+        private bool CheckCommandExists(string command)
+        {
+            try
+            {
+                var startInfo = new ProcessStartInfo
+                {
+                    FileName = "which",
+                    Arguments = command,
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    CreateNoWindow = true
+                };
+
+                using var process = new Process { StartInfo = startInfo };
+                process.Start();
+                var output = process.StandardOutput.ReadToEnd();
+                process.WaitForExit();
+
+                return process.ExitCode == 0 && !string.IsNullOrWhiteSpace(output);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private async Task<string> GetYtDlpVersion()
+        {
+            try
+            {
+                var startInfo = new ProcessStartInfo
+                {
+                    FileName = _ytDlpPath,
+                    Arguments = "--version",
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    CreateNoWindow = true
+                };
+
+                using var process = new Process { StartInfo = startInfo };
+                process.Start();
+                var version = await process.StandardOutput.ReadToEndAsync();
+                await process.WaitForExitAsync();
+
+                return process.ExitCode == 0 ? version.Trim() : "Unknown";
+            }
+            catch (Exception ex)
+            {
+                return $"Error: {ex.Message}";
             }
         }
 
@@ -1265,40 +1371,36 @@ namespace YouTube.Controllers
         //}
 
 
-        // Fix 1: Update the RunYtDlpWithCookiesAsync method to properly escape arguments
+        // Fix 2: Update RunYtDlpWithCookiesAsync for Docker (no browser cookies available)
         private async Task<YtDlpResult> RunYtDlpWithCookiesAsync(List<string> arguments)
         {
-            var cookiesPath = Path.Combine(_downloadPath, "youtube_cookies.txt");
-
             var enhancedArgs = new List<string>();
 
-            // Fix: Properly escape the user-agent string
+            // Docker-compatible anti-detection measures (no browser cookies)
             enhancedArgs.Add("--user-agent");
-            enhancedArgs.Add("\"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36\"");
+            enhancedArgs.Add("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
 
             enhancedArgs.Add("--referer");
             enhancedArgs.Add("https://www.youtube.com/");
 
-            // Add cookies from browser (more effective than manual cookies)
-            enhancedArgs.Add("--cookies-from-browser");
-            enhancedArgs.Add("chrome"); // or "firefox", "edge", "safari"
+            // Add headers to mimic real browser behavior
+            enhancedArgs.Add("--add-header");
+            enhancedArgs.Add("Accept:text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8");
 
-            // Alternative: if you have manual cookies file
-            if (System.IO.File.Exists(cookiesPath))
-            {
-                enhancedArgs.Add("--cookies");
-                enhancedArgs.Add($"\"{cookiesPath}\"");
-            }
+            enhancedArgs.Add("--add-header");
+            enhancedArgs.Add("Accept-Language:en-US,en;q=0.9");
 
-            // Additional anti-detection measures
+            enhancedArgs.Add("--add-header");
+            enhancedArgs.Add("Accept-Encoding:gzip, deflate, br");
+
+            // Network and retry settings
             enhancedArgs.AddRange(new[]
             {
         "--sleep-interval", "1",
         "--max-sleep-interval", "5",
         "--extractor-retries", "3",
-        "--no-check-certificate", // Sometimes helps with SSL issues
-        "--prefer-insecure", // Use HTTP instead of HTTPS when possible
-        "--socket-timeout", "30"
+        "--socket-timeout", "30",
+        "--fragment-retries", "10"
     });
 
             enhancedArgs.AddRange(arguments);
@@ -1312,8 +1414,7 @@ namespace YouTube.Controllers
                 CreateNoWindow = true
             };
 
-            // Fix: Don't manually join arguments, let ProcessStartInfo handle it
-            // This prevents issues with spaces and special characters
+            // Use ArgumentList for proper escaping
             startInfo.ArgumentList.Clear();
             foreach (var arg in enhancedArgs)
             {
@@ -1347,7 +1448,6 @@ namespace YouTube.Controllers
                 ExitCode = process.ExitCode
             };
         }
-
 
         private static string GetQualityFormat(string? quality)
         {
